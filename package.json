@@ -1,0 +1,8 @@
+{
+  "name": "st-tasks",
+  "version": "1.0.0",
+  "description": "Check work packages assigned to me on projects.sourcetop.com (OpenProject)",
+  "type": "module",
+  "bin": { "st-tasks": "./st-tasks.js", "st-task": "./st-tasks.js", "st": "./st-tasks.js" },
+  "engines": { "node": ">=22" }
+}
