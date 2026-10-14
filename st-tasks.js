@@ -29,6 +29,12 @@ const c = (code) => (s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : String(s));
 // OSC 8 terminal hyperlink; plain text when not a terminal.
 const link = (url, text) => (tty ? `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\` : text);
 const wpLink = (id) => link(`${BASE}/work_packages/${id}`, cyan('#' + id));
+
+// Text from the API is written by other users: drop control characters (escape
+// sequences could fake links, write the clipboard, etc.) and bidi overrides.
+// `safe` keeps newlines and tabs for multi-line text; `cell` flattens to one line.
+const safe = (s) => String(s ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, '');
+const cell = (s) => safe(s).replace(/\s+/g, ' ').trim();
 const bold = c(1), dim = c(2), red = c(31), green = c(32), yellow = c(33), cyan = c(36), magenta = c(35);
 
 function die(msg) {
@@ -77,11 +83,11 @@ async function fetchAssigned(includeClosed) {
   }
   return items.map((w) => ({
     id: w.id,
-    project: w._links.project?.title ?? '',
-    subject: w.subject,
-    type: w._links.type?.title ?? '',
-    status: w._links.status?.title ?? '',
-    priority: w._links.priority?.title ?? '',
+    project: cell(w._links.project?.title),
+    subject: cell(w.subject),
+    type: cell(w._links.type?.title),
+    status: cell(w._links.status?.title),
+    priority: cell(w._links.priority?.title),
     dueDate: w.dueDate,
     updatedAt: w.updatedAt,
     url: `${BASE}/work_packages/${w.id}`,
@@ -240,8 +246,8 @@ async function worklog(opts) {
     if (!byTask.has(key)) {
       byTask.set(key, {
         id: wp?.href ? Number(wp.href.split('/').pop()) : null,
-        project: e._links.project?.title ?? '',
-        subject: wp?.title ?? '(no task)',
+        project: cell(e._links.project?.title),
+        subject: wp?.title ? cell(wp.title) : '(no task)',
         activities: new Set(),
         comments: [],
         entries: 0,
@@ -251,8 +257,8 @@ async function worklog(opts) {
     const t = byTask.get(key);
     t.hours += hoursOf(e.hours);
     t.entries++;
-    if (e._links.activity?.title) t.activities.add(e._links.activity.title);
-    const comment = (typeof e.comment === 'string' ? e.comment : e.comment?.raw)?.trim();
+    if (e._links.activity?.title) t.activities.add(cell(e._links.activity.title));
+    const comment = cell(typeof e.comment === 'string' ? e.comment : e.comment?.raw);
     if (comment) t.comments.push(comment);
   }
   const tasks = [...byTask.values()].sort((a, b) => b.hours - a.hours);
@@ -284,12 +290,12 @@ async function worklog(opts) {
   ]);
 }
 
-const decode = (s) => s.replace(/&nbsp;|\u00a0/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+const decode = (s) => safe(s).replace(/&nbsp;|\u00a0/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
 
 const userNames = new Map();
 async function userName(href) {
   if (!href) return '?';
-  if (!userNames.has(href)) userNames.set(href, api(href.replace(/^\/api\/v3/, '')).then((u) => u.name, () => '?'));
+  if (!userNames.has(href)) userNames.set(href, api(href.replace(/^\/api\/v3/, '')).then((u) => cell(u.name) || '?', () => '?'));
   return userNames.get(href);
 }
 
@@ -297,16 +303,17 @@ async function show(id) {
   const w = await api(`/work_packages/${id}`);
   const acts = await api(`/work_packages/${id}/activities`);
   const L = w._links;
-  console.log(bold(wpLink(w.id) + ' ' + w.subject));
-  console.log(`${dim('Project:')}  ${L.project?.title}    ${dim('Type:')} ${L.type?.title}    ${dim('Status:')} ${statusColor(L.status?.title)(L.status?.title)}    ${dim('Priority:')} ${L.priority?.title}`);
-  console.log(`${dim('Assignee:')} ${L.assignee?.title ?? '-'}    ${dim('Author:')} ${L.author?.title ?? '-'}    ${dim('Due:')} ${dueLabel(w.dueDate) || '-'}    ${dim('Last updated:')} ${stamp(w.updatedAt)} ${dim(`(${rel(w.updatedAt)})`)}`);
+  const t = (k) => cell(L[k]?.title) || '-';
+  console.log(bold(wpLink(w.id) + ' ' + cell(w.subject)));
+  console.log(`${dim('Project:')}  ${t('project')}    ${dim('Type:')} ${t('type')}    ${dim('Status:')} ${statusColor(t('status'))(t('status'))}    ${dim('Priority:')} ${t('priority')}`);
+  console.log(`${dim('Assignee:')} ${t('assignee')}    ${dim('Author:')} ${t('author')}    ${dim('Due:')} ${dueLabel(w.dueDate) || '-'}    ${dim('Last updated:')} ${stamp(w.updatedAt)} ${dim(`(${rel(w.updatedAt)})`)}`);
   console.log(dim(`${BASE}/work_packages/${w.id}`));
   const desc = w.description?.raw?.trim();
   if (desc) console.log('\n' + bold('Description') + '\n' + decode(desc));
   const comments = acts._embedded.elements.filter((a) => a.comment?.raw?.trim()).slice(-5);
   if (comments.length) {
     console.log('\n' + bold(`Recent comments (${comments.length})`));
-    const names = await Promise.all(comments.map((a) => a._links.user?.title ?? userName(a._links.user?.href)));
+    const names = await Promise.all(comments.map((a) => (a._links.user?.title ? cell(a._links.user.title) : userName(a._links.user?.href))));
     comments.forEach((a, i) => console.log(`\n${cyan(names[i])} ${dim(rel(a.createdAt))}\n${decode(a.comment.raw).trim()}`));
   }
 }

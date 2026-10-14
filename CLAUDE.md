@@ -49,6 +49,8 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 - **`rel()`** returns m/h/d, then `Nmo ago`, then `X.Yy ago`. This keeps old tasks from showing duplicate-looking dates.
 - **EPIPE** (e.g. `st | head`) is handled by a `process.stdout.on('error')` handler that exits 0.
 
+- **Untrusted text:** subjects, comments, project and user names are written by other OpenProject users. Pass every API string through `cell()` (one line, for table cells and headers) or `safe()` / `decode()` (multi-line, for descriptions and comments) where it enters the program. They strip control characters and bidi overrides so content can't inject terminal escape sequences (fake OSC 8 links, OSC 52 clipboard writes).
+
 ## OpenProject API v3 quirks
 
 - **Auth:** Basic auth with user `apikey` and the token as the password. Responses are HAL JSON.
