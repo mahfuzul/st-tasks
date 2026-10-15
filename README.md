@@ -42,45 +42,86 @@ If you skip `npm link`, run the script directly with `./st-tasks.js` or `node st
 
 ## Usage
 
-The examples use `st`. After `npm link`, `st-tasks` and `st-task` work too: all three run the same script and take the same arguments.
+| Command | What it does |
+| --- | --- |
+| `st` | List the open tasks assigned to you |
+| `st show <id>` | Show one task: details, description and recent comments |
+| `st open <id>` | Open a task in your browser |
+| `st log [date]` | Show the time you logged on a day |
+| `st log --miss` | Find tasks you worked on but didn't log time for |
+| `st --help` | Print a short usage summary |
 
-To remove an alias, delete it from `bin` in `package.json` and run `npm link` again.
+The examples use `st`. After `npm link`, `st-tasks` and `st-task` work too: all three run the same script and take the same arguments. To remove an alias, delete it from `bin` in `package.json` and run `npm link` again.
 
-### List your tasks
+### `st`: list your tasks
+
+Shows the open tasks assigned to you, most recently updated first. It starts with a summary line, such as "You have 11 open tasks: 7 Open, 3 In progress and 1 On hold", and says when you last checked.
+
+| Option | What it does |
+| --- | --- |
+| `--all`, `-a` | Include closed tasks |
+| `-p`, `--project <name>` | Only tasks whose project name contains `<name>` |
+| `-s`, `--status <name>` | Only tasks whose status contains `<name>` |
+| `--json` | Print JSON instead of a table |
+
+Project and status matching is case-insensitive, and the two filters can be combined.
 
 ```sh
-st                 # open tasks assigned to you
-st --all           # include closed tasks (-a also works)
-st -p pubportal    # filter by project name (substring, case-insensitive)
-st -s progress     # filter by status name (substring, case-insensitive)
-st --json          # JSON output
+st                       # open tasks assigned to you
+st --all                 # include closed tasks
+st -p pubportal          # only the PubPortal project
+st -s progress           # only "In progress" tasks
+st -p kallman -s open    # both filters together
 ```
 
-The list opens with a summary line, such as "You have 11 open tasks: 7 Open, 3 In progress and 1 On hold", and says when you last checked. Tasks are shown in a bordered table (ID, Project, Subject, Status, Priority, Last updated, Log), sorted by last update. The `+ Log` link in the last column opens that task's "log time" page (`/work_packages/<id>/time_entries/new`) in your browser.
+The table has these columns: ID, Project, Subject, Status, Priority, Last updated and Log. The ID is a clickable link to the task in terminals that support links. The `+ Log` link opens that task's "log time" page (`/work_packages/<id>/time_entries/new`) in your browser.
 
-**NEW / UPD flags.** Each plain `st` run saves a snapshot of your open tasks to `.state.json`. On the next run, tasks that weren't in the snapshot are marked `NEW` and tasks updated since then are marked `UPD`. Filtered (`-p`, `-s`) and `--all` runs read the snapshot but don't overwrite it.
+**NEW / UPD flags.** Each plain `st` run saves a snapshot of your open tasks to `.state.json`. On the next run, tasks that weren't in the snapshot are marked `NEW` and tasks updated since then are marked `UPD`. Filtered (`-p`, `-s`) and `--all` runs read the snapshot but don't overwrite it, and `--all` shows no flags.
 
-### Look at one task
+### `st show <id>`: look at one task
+
+Prints the task's title, project, type, status, priority, assignee, author, due date, last updated time, link, description and the last 5 comments. `<id>` is the number in the task's URL (for the URL `.../work_packages/1234`, use `1234`).
 
 ```sh
-st show 1234       # details, description and the last 5 comments
-st open 1234       # open the task in your browser
+st show 1234
 ```
 
-### Work log
+### `st open <id>`: open a task in the browser
+
+Opens `/work_packages/<id>` in your default browser (`open` on macOS, `xdg-open` on Linux).
 
 ```sh
-st log             # time you logged today
+st open 1234
+```
+
+### `st log [date]`: your work log
+
+Shows the time you logged on a day: a summary line with your total, then a table of tasks sorted by time spent (Time, ID, Project, Subject, Entries, Comments). Without a date it uses today.
+
+| Date | Meaning |
+| --- | --- |
+| `today` | Today (the default) |
+| `yesterday` | Yesterday |
+| `-N` | N days ago, for example `-2` |
+| `YYYY-MM-DD` | A specific date |
+
+The date can go anywhere in the command.
+
+| Option | What it does |
+| --- | --- |
+| `--text` | Print the logged tasks as a plain "Working on:" list, ready to paste into a status update |
+| `--json` | Print JSON instead of a table |
+| `--miss` | List tasks you worked on but didn't log time for (see below) |
+
+```sh
+st log                   # today
 st log yesterday
-st log -2          # two days ago
-st log 2026-10-01  # a specific date
-st log --text      # the logged tasks as a "Working on:" list, ready to paste
-st log --json
-st log --miss      # tasks you touched but haven't logged time for (slower)
-st log -2 --miss   # the same for a specific day
+st log -2                # two days ago
+st log 2026-10-01        # a specific date
+st log --text            # a "Working on:" list for today
 ```
 
-The log shows your total time and a table of tasks sorted by time spent (Time, ID, Project, Subject, Entries, Comments). `--text` prints something like:
+`--text` prints something like:
 
 ```
 Working on:
@@ -89,7 +130,39 @@ Working on:
 - Task #1250: Update author guidelines page
 ```
 
-**Missing log time.** `st log --miss` is a reminder for forgotten entries. It lists the tasks where you left a comment or changed the status on that day (any project, any assignee) but have no time entry, with a short Activity note (`Commented`, `Status → QA`) and a `+ Log` link for each. It takes a few seconds because it reads the activity of every task updated that day, so it only runs when you ask for it. `--json` adds a `missingLogTime` list when `--miss` is used; `--text` ignores the flag.
+If nothing was logged, it prints `No time logged on <date>.`
+
+### `st log --miss`: find missing log time
+
+A reminder for forgotten entries. It shows the tasks where you left a comment or changed the status on that day, on any project and whatever the assignee, but have no time entry that day. Use it with any date.
+
+```sh
+st log --miss            # today
+st log -2 --miss         # two days ago
+```
+
+The output is a table with the task (ID, Project, Subject), what you did (`Commented`, `Status → QA`) and a `+ Log` link to log the time:
+
+```
+1 task with activity but no time logged on Tue, 13 Oct 2026:
+╭────────┬──────────────────┬────────────────────────┬───────────────────────────────┬───────╮
+│ ID     │ Project          │ Subject                │ Activity                      │ Log   │
+├────────┼──────────────────┼────────────────────────┼───────────────────────────────┼───────┤
+│ #20932 │ Site Maintenance │ Stripe security update │ Commented, Status → At Client │ + Log │
+╰────────┴──────────────────┴────────────────────────┴───────────────────────────────┴───────╯
+```
+
+It takes a few seconds because it reads the activity of every task updated that day, so it only runs when you ask for it. With `--json` the list is added as `missingLogTime`. `--text` ignores the flag.
+
+### `st --help`: usage summary
+
+Prints the list of commands and options.
+
+```sh
+st --help
+```
+
+## Good to know
 
 ### Updates
 
@@ -101,13 +174,7 @@ Update available (2 new commits). Run: git -C /path/to/st-tasks pull
 
 It compares against the last fetched state, and a background `git fetch` refreshes that at most every 6 hours, so it never slows a command down. The notice shows one run after a new commit lands. It's skipped when output is piped, with `--json` / `--text`, with `NO_COLOR` set, or if the checkout has no upstream branch.
 
-### Help
-
-```sh
-st --help
-```
-
-## Output notes
+### Output
 
 - In a terminal, task IDs are clickable links (OSC 8) in terminals that support them.
 - Colors are turned off when the output is piped or `NO_COLOR` is set.
