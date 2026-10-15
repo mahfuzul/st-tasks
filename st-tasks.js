@@ -38,7 +38,50 @@ const safe = (s) => String(s ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\
 const cell = (s) => safe(s).replace(/\s+/g, ' ').trim();
 const bold = c(1), dim = c(2), red = c(31), green = c(32), yellow = c(33), cyan = c(36), magenta = c(35);
 
+// Spinner / progress bar on stderr for slow commands. A no-op unless stderr is a terminal, so
+// pipes and redirects stay clean. Call stop() before printing anything to stdout.
+const loader = (() => {
+  const frames = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+  let timer = null, label = '', prog = null, started = 0, i = 0;
+  const on = process.stderr.isTTY;
+  const clock = () => { const s = Math.floor((Date.now() - started) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  function draw() {
+    const cols = process.stderr.columns || 80;
+    let text = label;
+    if (prog) {
+      const pct = Math.round((prog.done / prog.total) * 100), fill = Math.round((prog.done / prog.total) * 20);
+      const tail = `  [${'█'.repeat(fill)}${'░'.repeat(20 - fill)}] ${prog.done}/${prog.total}  ${pct}%  ·  ${clock()}`;
+      text = (label.length + tail.length + 2 > cols ? label.slice(0, Math.max(0, cols - tail.length - 3)) + '…' : label) + tail;
+    } else if (Date.now() - started > 3000) text += `  ·  ${clock()}`;
+    process.stderr.write(`\r\x1b[2K${dim(frames[i++ % frames.length])} ${text.slice(0, cols - 2)}`);
+  }
+  const self = {
+    start(text) {
+      if (!on || timer) return self.set(text);
+      label = text; started = Date.now();
+      process.stderr.write('\x1b[?25l');
+      draw();
+      timer = setInterval(draw, 80);
+      timer.unref();
+    },
+    set(text) { label = text; prog = null; },
+    progress(done, total, text) { if (text) label = text; prog = { done, total }; },
+    stop() {
+      if (!timer) return;
+      clearInterval(timer);
+      timer = null;
+      process.stderr.write('\r\x1b[2K\x1b[?25h');
+    },
+  };
+  if (on) {
+    process.on('exit', self.stop);
+    process.on('SIGINT', () => { self.stop(); process.exit(130); });
+  }
+  return self;
+})();
+
 function die(msg) {
+  loader.stop();
   console.error(red('error: ') + msg);
   process.exit(1);
 }
@@ -156,7 +199,9 @@ function table(rows, cols) {
 }
 
 async function list(opts) {
+  loader.start('Fetching your tasks…');
   let tasks = await fetchAssigned(opts.all);
+  loader.stop();
   if (opts.project) tasks = tasks.filter((t) => t.project.toLowerCase().includes(opts.project.toLowerCase()));
   if (opts.status) tasks = tasks.filter((t) => t.status.toLowerCase().includes(opts.status.toLowerCase()));
 
@@ -229,6 +274,7 @@ function fmtHours(h) {
 
 // Tasks where I commented or changed the status on `date` (local day), whoever they're assigned to.
 async function fetchTouched(date, meId) {
+  loader.set(`Finding tasks updated on ${date}…`);
   const start = new Date(date + 'T00:00:00'), end = new Date(start);
   end.setDate(end.getDate() + 1);
   const tasks = [];
@@ -243,10 +289,13 @@ async function fetchTouched(date, meId) {
   }
   const mine = `/users/${meId}`;
   const touched = [];
+  let done = 0;
+  loader.progress(0, tasks.length, 'Reading task activity');
   // A few activity requests at a time, so a busy day doesn't open dozens of connections.
   for (let i = 0; i < tasks.length; i += 8) {
     await Promise.all(tasks.slice(i, i + 8).map(async (w) => {
       const acts = (await api(`/work_packages/${w.id}/activities`))._embedded.elements;
+      loader.progress(++done, tasks.length);
       const actions = new Set();
       for (const a of acts) {
         const at = new Date(a.createdAt);
@@ -265,6 +314,7 @@ async function fetchTouched(date, meId) {
 
 async function worklog(opts) {
   const date = parseDate(opts.date);
+  loader.start(`Fetching time entries for ${date}…`);
   const me = await api('/users/me');
   const entries = [];
   for (let offset = 1; ; offset++) {
@@ -305,12 +355,14 @@ async function worklog(opts) {
 
   // Plain list for pasting into a status update.
   if (opts.text) {
+    loader.stop();
     if (!tasks.length) return console.log(`No time logged on ${date}.`);
     return console.log('Working on:\n\n' + tasks.map((t) => `- ${t.id ? `Task #${t.id}: ` : ''}${t.subject}`).join('\n'));
   }
 
   // Slow (one request per task updated that day), so only on request.
   const missing = opts.miss ? (await fetchTouched(date, me.id)).filter((t) => !tasks.some((x) => x.id === t.id)) : [];
+  loader.stop();
 
   if (opts.json) return console.log(JSON.stringify({ date, totalHours: total, tasks: tasks.map((t) => ({ ...t, activities: [...t.activities] })), ...(opts.miss && { missingLogTime: missing }) }, null, 2));
 
@@ -356,8 +408,10 @@ async function userName(href) {
 }
 
 async function show(id) {
+  loader.start(`Fetching task #${id}…`);
   const w = await api(`/work_packages/${id}`);
   const acts = await api(`/work_packages/${id}/activities`);
+  loader.stop();
   const L = w._links;
   const t = (k) => cell(L[k]?.title) || '-';
   console.log(bold(wpLink(w.id) + ' ' + cell(w.subject)));

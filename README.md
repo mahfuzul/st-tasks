@@ -179,6 +179,7 @@ It compares against the last fetched state, and a background `git fetch` refresh
 - In a terminal, task IDs are clickable links (OSC 8) in terminals that support them.
 - Colors are turned off when the output is piped or `NO_COLOR` is set.
 - When piped, long subjects aren't truncated, so tools like `grep` see the full text.
+- While a command is fetching data, a spinner shows on stderr (with a progress bar and elapsed time for `st log --miss`). It's hidden when stderr isn't a terminal, so pipes and redirects stay clean.
 
 ## Files
 
