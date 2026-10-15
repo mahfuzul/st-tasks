@@ -16,7 +16,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 | `st` / `st-tasks` | `list()` | Open tasks assigned to me. Filters: `--all`/`-a`, `-p <project>`, `-s <status>`, `--json` |
 | `st show <id>` | `show()` | Details, description, "Last updated", the last 5 comments |
 | `st open <id>` | inline | Opens the task in the browser (`open` on macOS, `xdg-open` elsewhere) |
-| `st log [date]` | `worklog()` | Time logged on a date. Date: `today`, `yesterday`, `-N`, `YYYY-MM-DD`, in any position. `--text` and `--json` |
+| `st log [date]` | `worklog()` | Time logged on a date. Date: `today`, `yesterday`, `-N`, `YYYY-MM-DD`, in any position. `--text`, `--json`, `--miss` |
 | `st --help` | inline | Prints the header comment lines of `st-tasks.js` (`.split('\n').slice(1, 13)`). **Update that slice if you add or remove usage lines.** |
 
 ## Output (requested by the user, keep as is)
@@ -24,7 +24,8 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 - **Always a table.** Bordered, rounded box drawing (`╭┬╮ │ ├┼┤ ╰┴╯`), dimmed borders, bold header.
 - **List columns:** flag (NEW/UPD), ID, Project, Subject, Status, Priority, Last updated, Log. "Last updated" is the local `YYYY-MM-DD HH:MM` plus a dim relative time. "Log" is an OSC 8 link to `${BASE}/work_packages/<id>/time_entries/new` (plain text "+ Log" when not a TTY).
 - **Log columns:** Time, ID, Project, Subject, Entries, Comments.
-- The **Type**, **Due** and **Activity** columns were removed on purpose. `dueLabel()` is still in the file but unused.
+- **Missing log time (`st log --miss`):** shows only a table of tasks I commented on or changed the status of that day with no time entry ("N tasks with activity but no time logged DATE:"). Columns: ID, Project, Subject, Activity (`Commented`, `Status → X`), Log (`+ Log` link). `--json` adds `missingLogTime`; `--text` ignores the flag. It's a flag because it's slow (5-15s): `fetchTouched()` lists tasks with `updatedAt` `<>d` over the local-day window (all projects, any assignee), then reads each task's `/activities` (8 at a time) and keeps mine. Plain `st log` stays fast (one time-entries query).
+- The **Type**, **Due** and **Activity** columns were removed on purpose from the list and log tables (Activity only exists in the missing-log-time table). `dueLabel()` is still in the file but unused.
 - **Summary line above the list:** "You have N open tasks: 7 Open, 3 In progress and 1 On hold." Statuses are sorted by count. Without `--all` it is followed by "Last checked … · N new or updated since then".
 - **Log summary:** "You logged Xh Ym today (Wed, 14 Oct 2026) across N tasks (M entries)."
 - **`log --text`** prints exactly this, for pasting into chat:

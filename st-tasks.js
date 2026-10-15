@@ -8,7 +8,8 @@
 //   st-tasks --json          raw JSON output
 //   st-tasks show <id>       details, description and recent comments for one task
 //   st-tasks open <id>       open the task in the browser
-//   st-tasks log [date]      my work log for today, yesterday or YYYY-MM-DD: total time and tasks by time logged
+//   st-tasks log [date]      my work log for today, yesterday or YYYY-MM-DD: time logged per task
+//   st-tasks log --miss      tasks I commented on or changed the status of with no time logged (slower)
 //   st-tasks log --text      the same tasks as a plain "Working on:" list to paste into a status update
 
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
@@ -59,6 +60,7 @@ function parseArgs(argv) {
     if (a === '--all' || a === '-a') opts.all = true;
     else if (a === '--json') opts.json = true;
     else if (a === '--text') opts.text = true;
+    else if (a === '--miss') opts.miss = true;
     else if (a === '-p' || a === '--project') opts.project = argv[++i];
     else if (a === '-s' || a === '--status') opts.status = argv[++i];
     else if (a === '-h' || a === '--help') opts.cmd = 'help';
@@ -225,6 +227,42 @@ function fmtHours(h) {
   return hh && mm ? `${hh}h ${mm}m` : hh ? `${hh}h` : `${mm}m`;
 }
 
+// Tasks where I commented or changed the status on `date` (local day), whoever they're assigned to.
+async function fetchTouched(date, meId) {
+  const start = new Date(date + 'T00:00:00'), end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  const tasks = [];
+  for (let offset = 1; ; offset++) {
+    const page = await api('/work_packages', {
+      filters: [{ updatedAt: { operator: '<>d', values: [start.toISOString(), end.toISOString()] } }],
+      pageSize: '100',
+      offset: String(offset),
+    });
+    tasks.push(...page._embedded.elements);
+    if (tasks.length >= page.total || page._embedded.elements.length === 0) break;
+  }
+  const mine = `/users/${meId}`;
+  const touched = [];
+  // A few activity requests at a time, so a busy day doesn't open dozens of connections.
+  for (let i = 0; i < tasks.length; i += 8) {
+    await Promise.all(tasks.slice(i, i + 8).map(async (w) => {
+      const acts = (await api(`/work_packages/${w.id}/activities`))._embedded.elements;
+      const actions = new Set();
+      for (const a of acts) {
+        const at = new Date(a.createdAt);
+        if (!a._links.user?.href?.endsWith(mine) || at < start || at >= end) continue;
+        if (a.comment?.raw?.trim()) actions.add('Commented');
+        for (const d of a.details || []) {
+          const m = /^Status changed from .*?\s*\nto (.+)$/s.exec(d.raw || '');
+          if (m) actions.add(`Status → ${cell(m[1])}`);
+        }
+      }
+      if (actions.size) touched.push({ id: w.id, project: cell(w._links.project?.title), subject: cell(w.subject), actions: [...actions] });
+    }));
+  }
+  return touched.sort((a, b) => b.id - a.id);
+}
+
 async function worklog(opts) {
   const date = parseDate(opts.date);
   const me = await api('/users/me');
@@ -265,30 +303,47 @@ async function worklog(opts) {
   const tasks = [...byTask.values()].sort((a, b) => b.hours - a.hours);
   const total = tasks.reduce((sum, t) => sum + t.hours, 0);
 
-  if (opts.json) return console.log(JSON.stringify({ date, totalHours: total, tasks: tasks.map((t) => ({ ...t, activities: [...t.activities] })) }, null, 2));
-
   // Plain list for pasting into a status update.
   if (opts.text) {
     if (!tasks.length) return console.log(`No time logged on ${date}.`);
     return console.log('Working on:\n\n' + tasks.map((t) => `- ${t.id ? `Task #${t.id}: ` : ''}${t.subject}`).join('\n'));
   }
 
+  // Slow (one request per task updated that day), so only on request.
+  const missing = opts.miss ? (await fetchTouched(date, me.id)).filter((t) => !tasks.some((x) => x.id === t.id)) : [];
+
+  if (opts.json) return console.log(JSON.stringify({ date, totalHours: total, tasks: tasks.map((t) => ({ ...t, activities: [...t.activities] })), ...(opts.miss && { missingLogTime: missing }) }, null, 2));
+
   const day = new Date(date + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
   const when = date === isoDate(0) ? `today (${day})` : date === isoDate(-1) ? `yesterday (${day})` : `on ${day}`;
-  if (!entries.length) return console.log(`You haven't logged any time ${when}.`);
+  if (opts.miss) {
+    if (!missing.length) return console.log(green(`No tasks with activity but no time logged ${when}.`));
+  } else if (!entries.length) console.log(`You haven't logged any time ${when}.`);
+  else {
+    console.log(
+      `You logged ${bold(fmtHours(total))} ${when} across ${bold(tasks.length)} task${tasks.length === 1 ? '' : 's'}` +
+        dim(` (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})`) + '.\n',
+    );
+    table(tasks, [
+      { title: 'Time', get: (t) => bold(fmtHours(t.hours)) },
+      { title: 'ID', get: (t) => (t.id ? wpLink(t.id) : '') },
+      { title: 'Project', get: (t) => t.project },
+      { title: 'Subject', get: (t) => t.subject },
+      { title: 'Entries', get: (t) => t.entries },
+      { title: 'Comments', get: (t) => dim(t.comments.join('; ')) },
+    ]);
+  }
 
-  console.log(
-    `You logged ${bold(fmtHours(total))} ${when} across ${bold(tasks.length)} task${tasks.length === 1 ? '' : 's'}` +
-      dim(` (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})`) + '.\n',
-  );
-  table(tasks, [
-    { title: 'Time', get: (t) => bold(fmtHours(t.hours)) },
-    { title: 'ID', get: (t) => (t.id ? wpLink(t.id) : '') },
-    { title: 'Project', get: (t) => t.project },
-    { title: 'Subject', get: (t) => t.subject },
-    { title: 'Entries', get: (t) => t.entries },
-    { title: 'Comments', get: (t) => dim(t.comments.join('; ')) },
-  ]);
+  if (missing.length) {
+    console.log(`${yellow(`${missing.length} task${missing.length === 1 ? '' : 's'} with activity but no time logged ${when}:`)}\n`);
+    table(missing, [
+      { title: 'ID', get: (t) => wpLink(t.id) },
+      { title: 'Project', get: (t) => t.project },
+      { title: 'Subject', get: (t) => t.subject },
+      { title: 'Activity', get: (t) => t.actions.join(', ') },
+      { title: 'Log', get: (t) => link(`${BASE}/work_packages/${t.id}/time_entries/new`, green('+ Log')) },
+    ]);
+  }
 }
 
 const decode = (s) => safe(s).replace(/&nbsp;|\u00a0/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
