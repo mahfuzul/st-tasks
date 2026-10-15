@@ -192,6 +192,7 @@ async function list(opts) {
     { title: 'Status', get: (t) => statusColor(t.status)(t.status) },
     { title: 'Priority', get: (t) => priorityColor(t.priority)(t.priority) },
     { title: 'Last updated', get: (t) => stamp(t.updatedAt) + ' ' + dim(`(${rel(t.updatedAt)})`) },
+    { title: 'Log', get: (t) => link(`${t.url}/time_entries/new`, green('+ Log')) },
   ]);
 }
 

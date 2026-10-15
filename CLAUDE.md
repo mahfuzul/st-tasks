@@ -22,7 +22,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 ## Output (requested by the user, keep as is)
 
 - **Always a table.** Bordered, rounded box drawing (`╭┬╮ │ ├┼┤ ╰┴╯`), dimmed borders, bold header.
-- **List columns:** flag (NEW/UPD), ID, Project, Subject, Status, Priority, Last updated. "Last updated" is the local `YYYY-MM-DD HH:MM` plus a dim relative time.
+- **List columns:** flag (NEW/UPD), ID, Project, Subject, Status, Priority, Last updated, Log. "Last updated" is the local `YYYY-MM-DD HH:MM` plus a dim relative time. "Log" is an OSC 8 link to `${BASE}/work_packages/<id>/time_entries/new` (plain text "+ Log" when not a TTY).
 - **Log columns:** Time, ID, Project, Subject, Entries, Comments.
 - The **Type**, **Due** and **Activity** columns were removed on purpose. `dueLabel()` is still in the file but unused.
 - **Summary line above the list:** "You have N open tasks: 7 Open, 3 In progress and 1 On hold." Statuses are sorted by count. Without `--all` it is followed by "Last checked … · N new or updated since then".
