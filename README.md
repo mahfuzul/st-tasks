@@ -152,7 +152,7 @@ The output is a table with the task (ID, Project, Subject), what you did (`Comme
 ╰────────┴──────────────────┴────────────────────────┴───────────────────────────────┴───────╯
 ```
 
-It takes a few seconds because it reads the activity of every task updated that day, so it only runs when you ask for it. With `--json` the list is added as `missingLogTime`. `--text` ignores the flag.
+It also finds tasks that were updated by someone else after that day. It skips tasks you already logged time on, and it reads the activity of the rest, so it only runs when you ask for it. The first run for an old date can take a while (about 40 seconds for two weeks back); your activity is cached in `.cache.json`, so later runs, for any date, take a few seconds. With `--json` the list is added as `missingLogTime`. `--text` ignores the flag.
 
 ### `st --help`: usage summary
 
@@ -189,3 +189,4 @@ It compares against the last fetched state, and a background `git fetch` refresh
 | `.env` | Your instance URL and token (git-ignored) |
 | `.env.example` | Template for `.env` |
 | `.state.json` | Snapshot used for NEW / UPD flags (git-ignored) |
+| `.cache.json` | Your activity per task, used to speed up `st log --miss` (git-ignored, safe to delete) |

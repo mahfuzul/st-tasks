@@ -19,6 +19,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(ROOT, '.state.json');
+const CACHE_FILE = join(ROOT, '.cache.json');
 
 if (existsSync(join(ROOT, '.env'))) process.loadEnvFile(join(ROOT, '.env'));
 const BASE = (process.env.OPENPROJECT_URL || 'https://projects.sourcetop.com').replace(/\/$/, '');
@@ -292,41 +293,73 @@ function fmtHours(h) {
 }
 
 // Tasks where I commented or changed the status on `date` (local day), whoever they're assigned to.
-async function fetchTouched(date, meId) {
-  loader.set(`Finding tasks updated on ${date}…`);
+// Cache of my activities per task, keyed by the task's updatedAt (any new activity changes it), so
+// tasks that haven't changed since the last run need no request, for any date.
+function loadCache(meId) {
+  try {
+    const c = JSON.parse(readFileSync(CACHE_FILE, 'utf8'));
+    if (c.base === BASE && c.meId === meId && c.tasks) return c;
+  } catch {}
+  return { base: BASE, meId, tasks: {} };
+}
+
+// Tasks where I commented or changed the status on `date` (local day), whoever they're assigned to.
+// Tasks in `skipIds` (already have time logged that day) are not checked.
+async function fetchTouched(date, meId, skipIds = new Set()) {
+  loader.set(`Finding tasks updated since ${date}…`);
   const start = new Date(date + 'T00:00:00'), end = new Date(start);
   end.setDate(end.getDate() + 1);
-  const tasks = [];
+  // Updated from the start of that day until now: a task I commented on that day may have changed since.
+  const all = [];
   for (let offset = 1; ; offset++) {
     const page = await api('/work_packages', {
-      filters: [{ updatedAt: { operator: '<>d', values: [start.toISOString(), end.toISOString()] } }],
+      filters: [{ updatedAt: { operator: '<>d', values: [start.toISOString(), new Date().toISOString()] } }],
       pageSize: '100',
       offset: String(offset),
     });
-    tasks.push(...page._embedded.elements);
-    if (tasks.length >= page.total || page._embedded.elements.length === 0) break;
+    all.push(...page._embedded.elements);
+    if (all.length >= page.total || page._embedded.elements.length === 0) break;
   }
-  const mine = `/users/${meId}`;
-  const touched = [];
+  const tasks = all.filter((w) => !skipIds.has(w.id));
+
+  const cache = loadCache(meId), mine = `/users/${meId}`, now = Date.now();
+  const todo = tasks.filter((w) => cache.tasks[w.id]?.updatedAt !== w.updatedAt);
+  const cached = tasks.length - todo.length;
   let done = 0;
-  loader.progress(0, tasks.length, 'Reading task activity');
+  loader.progress(0, todo.length, `Reading task activity${cached ? ` (${cached} cached)` : ''}`);
   // A few activity requests at a time, so a busy day doesn't open dozens of connections.
-  for (let i = 0; i < tasks.length; i += 8) {
-    await Promise.all(tasks.slice(i, i + 8).map(async (w) => {
+  for (let i = 0; i < todo.length; i += 12) {
+    await Promise.all(todo.slice(i, i + 12).map(async (w) => {
       const acts = (await api(`/work_packages/${w.id}/activities`))._embedded.elements;
-      loader.progress(++done, tasks.length);
-      const actions = new Set();
+      loader.progress(++done, todo.length);
+      const found = [];
       for (const a of acts) {
-        const at = new Date(a.createdAt);
-        if (!a._links.user?.href?.endsWith(mine) || at < start || at >= end) continue;
+        if (!a._links.user?.href?.endsWith(mine)) continue;
+        const actions = new Set();
         if (a.comment?.raw?.trim()) actions.add('Commented');
         for (const d of a.details || []) {
           const m = /^Status changed from .*?\s*\nto (.+)$/s.exec(d.raw || '');
           if (m) actions.add(`Status → ${cell(m[1])}`);
         }
+        if (actions.size) found.push({ at: a.createdAt, actions: [...actions] });
       }
-      if (actions.size) touched.push({ id: w.id, project: cell(w._links.project?.title), subject: cell(w.subject), actions: [...actions] });
+      cache.tasks[w.id] = { updatedAt: w.updatedAt, seen: now, mine: found };
     }));
+  }
+  if (todo.length) {
+    // Keep the file small: forget tasks not seen for 60 days.
+    for (const [id, t] of Object.entries(cache.tasks)) if (now - t.seen > 60 * 86400000) delete cache.tasks[id];
+    try { writeFileSync(CACHE_FILE, JSON.stringify(cache)); } catch {}
+  }
+
+  const touched = [];
+  for (const w of tasks) {
+    const actions = new Set();
+    for (const a of cache.tasks[w.id].mine) {
+      const at = new Date(a.at);
+      if (at >= start && at < end) a.actions.forEach((x) => actions.add(x));
+    }
+    if (actions.size) touched.push({ id: w.id, project: cell(w._links.project?.title), subject: cell(w.subject), actions: [...actions] });
   }
   return touched.sort((a, b) => b.id - a.id);
 }
@@ -380,7 +413,7 @@ async function worklog(opts) {
   }
 
   // Slow (one request per task updated that day), so only on request.
-  const missing = opts.miss ? (await fetchTouched(date, me.id)).filter((t) => !tasks.some((x) => x.id === t.id)) : [];
+  const missing = opts.miss ? await fetchTouched(date, me.id, new Set(tasks.map((t) => t.id))) : [];
   loader.stop();
 
   if (opts.json) return console.log(JSON.stringify({ date, totalHours: total, tasks: tasks.map((t) => ({ ...t, activities: [...t.activities] })), ...(opts.miss && { missingLogTime: missing }) }, null, 2));
