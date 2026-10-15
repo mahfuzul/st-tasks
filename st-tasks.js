@@ -86,13 +86,32 @@ function die(msg) {
   process.exit(1);
 }
 
+// Turn a failed API response into a short, readable message.
+async function apiError(res, path) {
+  let detail = '';
+  try { detail = cell((await res.json()).message); } catch {}
+  const wp = /^\/api\/v3\/work_packages\/(\d+)/.exec(path)?.[1];
+  const what = wp ? `Task #${wp}` : 'That resource';
+  if (res.status === 401) return `Authentication failed. Check OPENPROJECT_TOKEN in .env (create one at ${BASE}/my/access_token).`;
+  if (res.status === 403) return `${what}: you don't have permission to access it.`;
+  if (res.status === 404) return `${what} not found, or you don't have access to it.`;
+  if (res.status === 429) return 'Too many requests. Wait a moment and try again.';
+  if (res.status >= 500) return `${BASE} had a server error (${res.status}). Try again later.`;
+  return `${res.status} ${res.statusText}${detail ? ': ' + detail : ''} (${path})`;
+}
+
 async function api(path, params) {
   const url = new URL(BASE + '/api/v3' + path);
   for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, typeof v === 'string' ? v : JSON.stringify(v));
-  const res = await fetch(url, {
-    headers: { Authorization: 'Basic ' + Buffer.from('apikey:' + TOKEN).toString('base64'), Accept: 'application/hal+json' },
-  });
-  if (!res.ok) die(`${res.status} ${res.statusText} — ${url.pathname}\n${(await res.text()).slice(0, 300)}`);
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: { Authorization: 'Basic ' + Buffer.from('apikey:' + TOKEN).toString('base64'), Accept: 'application/hal+json' },
+    });
+  } catch (e) {
+    die(`Can't reach ${BASE}${e.cause?.code ? ` (${e.cause.code})` : ''}. Check your connection and OPENPROJECT_URL.`);
+  }
+  if (!res.ok) die(await apiError(res, url.pathname));
   return res.json();
 }
 
