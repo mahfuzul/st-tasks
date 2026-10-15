@@ -11,10 +11,10 @@
 //   st-tasks log [date]      my work log for today, yesterday or YYYY-MM-DD: total time and tasks by time logged
 //   st-tasks log --text      the same tasks as a plain "Working on:" list to paste into a status update
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(ROOT, '.state.json');
@@ -319,6 +319,24 @@ async function show(id) {
   }
 }
 
+// Tell the user when the upstream repo has commits they haven't pulled. The check is a local
+// rev-list against the last fetched state; a throttled background `git fetch` keeps that fresh
+// (FETCH_HEAD's mtime is the throttle), so there is never any added latency.
+function updateNotice() {
+  if (!process.stderr.isTTY || process.env.NO_COLOR || !existsSync(join(ROOT, '.git'))) return;
+  try {
+    const behind = Number(execFileSync('git', ['-C', ROOT, 'rev-list', '--count', 'HEAD..@{u}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    if (behind > 0) console.error('\n' + yellow(`Update available (${behind} new commit${behind === 1 ? '' : 's'}). Run: git -C ${ROOT} pull`));
+  } catch {}
+  let age = Infinity;
+  try { age = Date.now() - statSync(join(ROOT, '.git', 'FETCH_HEAD')).mtimeMs; } catch {}
+  if (age > 6 * 3600 * 1000) {
+    const git = spawn('git', ['-C', ROOT, 'fetch', '--quiet'], { detached: true, stdio: 'ignore', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    git.on('error', () => {});
+    git.unref();
+  }
+}
+
 // Exit quietly when the reader goes away (e.g. `st-tasks | head`).
 process.stdout.on('error', (e) => (e.code === 'EPIPE' ? process.exit(0) : Promise.reject(e)));
 
@@ -334,3 +352,4 @@ if (opts.cmd === 'help') {
 } else {
   await list(opts);
 }
+if (!['help', 'open'].includes(opts.cmd) && !opts.json && !opts.text) updateNotice();

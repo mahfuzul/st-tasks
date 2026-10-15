@@ -47,6 +47,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
   - Columns with no title and no values are dropped.
 - **`.state.json`** holds `{checkedAt, tasks: {id: updatedAt}}`. It drives the NEW/UPD flags. Only a plain, unfiltered open-task run writes it. `--all` shows no flags at all, otherwise closed tasks would all show as NEW.
 - **`rel()`** returns m/h/d, then `Nmo ago`, then `X.Yy ago`. This keeps old tasks from showing duplicate-looking dates.
+- **Update notice:** `updateNotice()` prints "Update available (N new commits). Run: git -C <repo> pull" to **stderr** (TTY only, never with `--json`/`--text`/`open`/`--help`). It counts `HEAD..@{u}` locally, and a detached background `git fetch` runs when `.git/FETCH_HEAD` is over 6h old, so the notice shows one run after a push. Needs an upstream branch; silent otherwise.
 - **EPIPE** (e.g. `st | head`) is handled by a `process.stdout.on('error')` handler that exits 0.
 
 - **Untrusted text:** subjects, comments, project and user names are written by other OpenProject users. Pass every API string through `cell()` (one line, for table cells and headers) or `safe()` / `decode()` (multi-line, for descriptions and comments) where it enters the program. They strip control characters and bidi overrides so content can't inject terminal escape sequences (fake OSC 8 links, OSC 52 clipboard writes).
