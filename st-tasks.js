@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // st-tasks — check work packages assigned to me on OpenProject.
+// `st` and `st-task` are aliases of `st-tasks`.
 //
 //   st-tasks                 open tasks assigned to me (NEW / UPDATED since last check are flagged)
 //   st-tasks --all           include closed tasks
@@ -7,15 +8,22 @@
 //   st-tasks -s progress     filter by status name (substring, case-insensitive)
 //   st-tasks --json          raw JSON output
 //   st-tasks show <id>       details, description and recent comments for one task
-//   st-tasks open <id>       open the task in the browser
 //   st-tasks log [date]      my work log for today, yesterday or YYYY-MM-DD: time logged per task
-//   st-tasks log --miss      tasks I commented on or changed the status of with no time logged (slower)
+//   st-tasks log --miss      tasks I commented on or changed the status of with no time logged (slower); offers to log time
 //   st-tasks log --text      the same tasks as a plain "Working on:" list to paste into a status update
+//   st-tasks log <id> 1h30m ["note"] [date] [--as qa]   log time (up to 8h; minutes 15m/30m/45m) on a task; default today, my usual activity
+//   st-tasks comment <id> "text"                        post a comment on a task
+//   st-tasks start <id>                                 Open -> In progress (with --force: from any status, assigned to me)
+//   st-tasks qa <id> <user>                             Open/In progress -> QA, assigned to <user> (also: question, at_client)
+//   st-tasks close <id>                                 Open/In progress -> Closed (add --force to skip the status check)
+//   st-tasks open <id> [user]                           any status -> Open, assigned to <user> if given (--force: to me)
+//   st-tasks assign <id> <user>                         assign to <user> only, status unchanged
 
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile, execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline/promises';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(ROOT, '.state.json');
@@ -88,51 +96,129 @@ function die(msg) {
 }
 
 // Turn a failed API response into a short, readable message.
-async function apiError(res, path) {
+async function apiError(res, path, write) {
   let detail = '';
-  try { detail = cell((await res.json()).message); } catch {}
+  try {
+    const body = await res.json();
+    detail = cell(body._embedded?.errors?.map((e) => e.message).join(' ') || body.message);
+  } catch {}
   const wp = /^\/api\/v3\/work_packages\/(\d+)/.exec(path)?.[1];
-  const what = wp ? `Task #${wp}` : 'That resource';
+  const what = wp ? `Task #${wp}` : /\/time_entries/.test(path) ? 'Time entry' : 'That resource';
   if (res.status === 401) return `Authentication failed. Check OPENPROJECT_TOKEN in .env (create one at ${BASE}/my/access_token).`;
-  if (res.status === 403) return `${what}: you don't have permission to access it.`;
+  if (res.status === 403) return `${what}: you don't have permission to ${write ? 'change it' : 'access it'}.`;
   if (res.status === 404) return `${what} not found, or you don't have access to it.`;
+  if (res.status === 409) return `${what} was changed by someone else a moment ago. Run the command again.`;
+  if (res.status === 422 && detail) return `${what}: ${detail}`;
   if (res.status === 429) return 'Too many requests. Wait a moment and try again.';
   if (res.status >= 500) return `${BASE} had a server error (${res.status}). Try again later.`;
   return `${res.status} ${res.statusText}${detail ? ': ' + detail : ''} (${path})`;
 }
 
-async function api(path, params) {
+// `init`: { method, body } for writes; { soft: true } throws instead of exiting, so a caller can carry on.
+// A thrown error has `ambiguous` set when the request may have reached the server (timeout, dropped
+// connection, 5xx), so a write may have been applied even though it reports a failure.
+async function api(path, params, init = {}) {
   const url = new URL(BASE + '/api/v3' + path);
   for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, typeof v === 'string' ? v : JSON.stringify(v));
+  const fail = (msg, ambiguous = false) => {
+    if (ambiguous && init.method) msg += ' The change may still have been applied: check before trying again.';
+    if (init.soft) throw Object.assign(new Error(msg), { ambiguous });
+    die(msg);
+  };
   let res;
   try {
     res = await fetch(url, {
-      headers: { Authorization: 'Basic ' + Buffer.from('apikey:' + TOKEN).toString('base64'), Accept: 'application/hal+json' },
+      method: init.method,
+      body: init.body && JSON.stringify(init.body),
+      headers: {
+        Authorization: 'Basic ' + Buffer.from('apikey:' + TOKEN).toString('base64'),
+        Accept: 'application/hal+json',
+        ...(init.body && { 'Content-Type': 'application/json' }),
+      },
+      signal: AbortSignal.timeout(30000),
     });
   } catch (e) {
-    die(`Can't reach ${BASE}${e.cause?.code ? ` (${e.cause.code})` : ''}. Check your connection and OPENPROJECT_URL.`);
+    const code = e.cause?.code ?? e.cause?.errors?.[0]?.code; // Node wraps IPv4/IPv6 attempts in an AggregateError
+    // Refused or unresolvable means the request never left, so nothing can have been applied.
+    fail(e.name === 'TimeoutError' ? `${BASE} didn't respond within 30 seconds.` : `Can't reach ${BASE}${code ? ` (${code})` : ''}. Check your connection and OPENPROJECT_URL.`, !['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(code));
   }
-  if (!res.ok) die(await apiError(res, url.pathname));
-  return res.json();
+  if (!res.ok) fail(await apiError(res, url.pathname, Boolean(init.method)), res.status >= 500);
+  if (res.status === 204) return null;
+  try {
+    return await res.json();
+  } catch {
+    fail(`${BASE} sent a response that is not valid JSON.`, true);
+  }
 }
+
+// Status shortcuts: `st qa 123 alex` moves a task from one of `from` to `to` (and assigns it when `user`).
+// `takeOver`: with --force the task is assigned to me. `to: null` only changes the assignee.
+const STATUS_CMDS = {
+  start: { to: 'In progress', from: ['Open'], takeOver: true },
+  qa: { to: 'QA', from: ['Open', 'In progress'], user: 'required' },
+  question: { to: 'Question', from: ['Open', 'In progress'], user: 'required' },
+  at_client: { to: 'At Client', from: ['Open', 'In progress'], user: 'required' },
+  close: { to: 'Closed', from: ['Open', 'In progress'] },
+  open: { to: 'Open', user: 'optional', takeOver: true }, // from any status
+  assign: { to: null, user: 'required' }, // assignee only, status untouched
+};
+const isDate = (a) => a === 'today' || a === 'yesterday' || /^-\d+$/.test(a) || /^\d{4}-\d{2}-\d{2}$/.test(a);
 
 function parseArgs(argv) {
   const opts = { all: false, json: false, project: null, status: null, cmd: 'list', id: null };
+  const value = (flag, v) => v ?? die(`${flag} needs a value`);
+  let literal = false; // after `--` every word is text, never an option
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--all' || a === '-a') opts.all = true;
-    else if (a === '--json') opts.json = true;
-    else if (a === '--text') opts.text = true;
-    else if (a === '--miss') opts.miss = true;
-    else if (a === '-p' || a === '--project') opts.project = argv[++i];
-    else if (a === '-s' || a === '--status') opts.status = argv[++i];
-    else if (a === '-h' || a === '--help') opts.cmd = 'help';
-    else if (a === 'show' || a === 'open') { opts.cmd = a; opts.id = argv[++i]; }
-    else if (a === 'log') opts.cmd = 'log';
-    else if (opts.cmd === 'log' && !opts.date && (!a.startsWith('-') || /^-\d+$/.test(a))) opts.date = a;
+    const a = argv[i], flag = literal ? null : a;
+    if (flag === '--') literal = true;
+    else if (flag === '--all' || flag === '-a') opts.all = true;
+    else if (flag === '--json') opts.json = true;
+    else if (flag === '--text') opts.text = true;
+    else if (flag === '--miss') opts.miss = true;
+    else if (flag === '--force' || flag === '-f') opts.force = true;
+    else if (flag === '--as') opts.as = value(flag, argv[++i]);
+    else if (flag === '-p' || flag === '--project') opts.project = value(flag, argv[++i]);
+    else if (flag === '-s' || flag === '--status') opts.status = value(flag, argv[++i]);
+    else if (flag === '-h' || flag === '--help') opts.cmd = 'help';
+    else if (opts.cmd === 'list') {
+      // Only the first word picks the command. Later words are that command's arguments and can
+      // never switch to another one, so a note like "close 456" can't run `st close 456`.
+      if (!['show', 'comment', 'log'].includes(a) && !Object.hasOwn(STATUS_CMDS, a)) die(`unknown argument: ${a}`);
+      opts.cmd = a;
+      if (a !== 'log') opts.id = argv[++i];
+      if (a === 'comment') {
+        // Everything after the id is the comment, so it may contain dashes and unquoted words.
+        opts.message = argv.slice(i + 1).join(' ').trim();
+        break;
+      }
+    }
+    else if (opts.cmd === 'help') continue;
+    else if (Object.hasOwn(STATUS_CMDS, opts.cmd)) {
+      if (!literal && a.startsWith('-')) die(`unknown argument: ${a}`);
+      (opts.who ??= []).push(a); // the person's name, even if a word in it is also a command
+    }
+    else if (opts.cmd === 'log') {
+      if (opts.noteWords) opts.noteWords.push(a); // once the note starts it runs to the end
+      else if (!opts.id && !opts.date && /^\d+$/.test(a)) opts.id = a; // st log <id> <duration> ...
+      else if (!opts.id) {
+        // st log [date]
+        if (opts.date || (a.startsWith('-') && !/^-\d+$/.test(a))) die(`unknown argument: ${a}`);
+        opts.date = a;
+      }
+      else if (!opts.duration && parseDuration(a)) opts.duration = a;
+      else if (!opts.date && isDate(a)) opts.date = a;
+      else if (!literal && a.startsWith('-')) die(`unknown option "${a}" (to start a note with a dash, put -- before the note)`);
+      else opts.noteWords = [a];
+    }
     else die(`unknown argument: ${a}`);
   }
-  if ((opts.cmd === 'show' || opts.cmd === 'open') && !/^\d+$/.test(opts.id || '')) die(`usage: st-tasks ${opts.cmd} <id>`);
+  const spec = STATUS_CMDS[opts.cmd];
+  const idCmds = ['show', 'comment', ...Object.keys(STATUS_CMDS)];
+  if (idCmds.includes(opts.cmd) && !/^\d+$/.test(opts.id || '')) die(`usage: st-tasks ${opts.cmd} <id>${opts.cmd === 'comment' ? ' "text"' : spec?.user === 'required' ? ' <user>' : spec?.user ? ' [user]' : ''}`);
+  if (opts.cmd === 'comment' && !opts.message) die('usage: st-tasks comment <id> "text"');
+  if (spec?.user === 'required' && !opts.who) die(`usage: st-tasks ${opts.cmd} <id> <user>`);
+  if (spec && !spec.user && opts.who) die(`unknown argument: ${opts.who[0]}`);
+  if (opts.cmd === 'log' && opts.id && !opts.duration) die('usage: st-tasks log <id> <duration> ["note"] [date]   e.g. st-tasks log 123 1h30m "fixed the bug"');
   return opts;
 }
 
@@ -364,20 +450,27 @@ async function fetchTouched(date, meId, skipIds = new Set()) {
   return touched.sort((a, b) => b.id - a.id);
 }
 
-async function worklog(opts) {
-  const date = parseDate(opts.date);
-  loader.start(`Fetching time entries for ${date}…`);
-  const me = await api('/users/me');
+// My time entries on `date`.
+async function fetchEntries(meId, date, init) {
   const entries = [];
   for (let offset = 1; ; offset++) {
     const page = await api('/time_entries', {
-      filters: [{ user: { operator: '=', values: [String(me.id)] } }, { spent_on: { operator: '=d', values: [date] } }],
+      filters: [{ user: { operator: '=', values: [String(meId)] } }, { spent_on: { operator: '=d', values: [date] } }],
       pageSize: '100',
       offset: String(offset),
-    });
+    }, init);
     entries.push(...page._embedded.elements);
     if (entries.length >= page.total || page._embedded.elements.length === 0) break;
   }
+  return entries;
+}
+
+async function worklog(opts) {
+  const date = parseDate(opts.date);
+  const activity = opts.as && activityByName(opts.as);
+  loader.start(`Fetching time entries for ${date}…`);
+  const me = await api('/users/me');
+  const entries = await fetchEntries(me.id, date);
 
   // Group entries by task, most time first.
   const byTask = new Map();
@@ -447,6 +540,7 @@ async function worklog(opts) {
       { title: 'Activity', get: (t) => t.actions.join(', ') },
       { title: 'Log', get: (t) => link(`${BASE}/work_packages/${t.id}/time_entries/new`, green('+ Log')) },
     ]);
+    if (process.stdin.isTTY && process.stdout.isTTY) await offerLogging(missing, date, me.id, activity);
   }
 }
 
@@ -480,6 +574,182 @@ async function show(id) {
   }
 }
 
+// ---- Writing: time entries, comments, status changes ----
+
+// Time entry activities on this OpenProject (ids come from the "Log time" form).
+const ACTIVITIES = [[1, 'Project Management'], [3, 'Developer'], [29, 'Senior Developer'], [19, 'QA'], [30, 'Design / Wireframe'], [6, 'Other']];
+const activityHref = (id) => `/api/v3/time_entries/activities/${id}`;
+const DURATION_HELP = 'up to 8h and minutes of 15m, 30m or 45m, e.g. 1h, 45m, 2h15m';
+
+// Items whose name matches `query`: an exact name wins, otherwise every word of the query must appear in it.
+function matchName(items, query, nameOf) {
+  const q = query.toLowerCase().trim();
+  const exact = items.filter((x) => nameOf(x).toLowerCase() === q);
+  if (exact.length) return exact;
+  const words = q.split(/\s+/);
+  return items.filter((x) => words.every((w) => nameOf(x).toLowerCase().includes(w)));
+}
+
+function activityByName(name) {
+  const hits = matchName(ACTIVITIES, name, (a) => a[1]);
+  if (hits.length === 1) return activityHref(hits[0][0]);
+  die(`${hits.length ? `"${name}" matches ${hits.map((a) => a[1]).join(', ')}` : `unknown activity "${name}"`} — choose one of: ${ACTIVITIES.map((a) => a[1]).join(', ')}`);
+}
+
+function parseDuration(s) {
+  const m = /^(?:(\d+)h)?(?:(\d+)m)?$/i.exec(s || '');
+  return s && m ? { h: Number(m[1] || 0), m: Number(m[2] || 0) } : null;
+}
+
+// Only what the Log time form offers: up to 8h plus 0/15/30/45 minutes. Returns null when invalid.
+function durationOf(s) {
+  const d = parseDuration(s);
+  if (!d || d.h > 8 || ![0, 15, 30, 45].includes(d.m) || (d.h === 8 && d.m > 45) || d.h + d.m === 0) return null;
+  return { iso: 'PT' + (d.h ? `${d.h}H` : '') + (d.m ? `${d.m}M` : ''), hours: d.h + d.m / 60 };
+}
+
+// The activity on my latest time entry (it follows the role), else Developer.
+async function defaultActivity(meId) {
+  let page;
+  try {
+    page = await api('/time_entries', { filters: [{ user: { operator: '=', values: [String(meId)] } }], sortBy: [['spentOn', 'desc']], pageSize: '1' }, { soft: true });
+  } catch (e) {
+    loader.stop();
+    console.error(yellow('warning: ') + `couldn't read your latest activity (${e.message}); using Developer. Pick another with --as.`);
+    return activityHref(3);
+  }
+  return page._embedded?.elements?.[0]?._links?.activity?.href || activityHref(3);
+}
+
+const activityName = (href) => ACTIVITIES.find(([id]) => activityHref(id) === href)?.[1] || 'activity ' + href.split('/').pop();
+
+function createEntry({ id, dur, date, note, activity, soft }) {
+  return api('/time_entries', {}, {
+    soft,
+    method: 'POST',
+    body: {
+      _links: { workPackage: { href: `/api/v3/work_packages/${id}` }, activity: { href: activity } },
+      hours: dur.iso,
+      spentOn: date,
+      ...(note && { comment: note }), // plain text on this server (a {raw} object is stored literally)
+    },
+  });
+}
+
+async function logTime(opts) {
+  const dur = durationOf(opts.duration) || die(`invalid duration "${opts.duration}" — use ${DURATION_HELP}`);
+  const date = parseDate(opts.date), note = (opts.noteWords || []).join(' ');
+  let activity = opts.as && activityByName(opts.as);
+  loader.start(`Logging time on task #${opts.id}…`);
+  const me = await api('/users/me');
+  activity ||= await defaultActivity(me.id);
+  const e = await createEntry({ id: opts.id, dur, date, note, activity });
+  loader.stop();
+  const title = cell(e._links.workPackage?.title), act = cell(e._links.activity?.title);
+  console.log(`${green('Logged')} ${bold(fmtHours(dur.hours))} on ${wpLink(opts.id)}${title ? ' ' + title : ''} ${dim(`(${date}${act ? ', ' + act : ''}) · entry #${e.id}`)}`);
+  // The entry exists by now, so a failed total must not look like a failed command (a retry would log twice).
+  try {
+    const total = (await fetchEntries(me.id, date, { soft: true })).reduce((sum, x) => sum + hoursOf(x.hours), 0);
+    console.log(`Total ${date === isoDate(0) ? 'today' : 'on ' + date}: ${bold(fmtHours(total))}`);
+  } catch (err) {
+    console.error(yellow('warning: ') + `the entry was saved, but the total for ${date} couldn't be fetched (${err.message})`);
+  }
+}
+
+// After `st log --miss`: ask for a duration for each task without time, e.g. "1h" or "45m fixed the menu".
+async function offerLogging(missing, date, meId, activity) {
+  activity ||= await defaultActivity(meId);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let closed = false;
+  const closedP = new Promise((resolve) => rl.once('close', () => { closed = true; resolve(null); }));
+  rl.on('SIGINT', () => rl.close());
+  // null once the prompt is closed (Ctrl-C, Ctrl-D, input ended); asking a closed prompt would throw.
+  const ask = async (q) => {
+    if (closed) return null;
+    try { return await Promise.race([rl.question(q), closedP]); } catch { return null; }
+  };
+  console.log(dim(`\nLog time on ${date} as ${activityName(activity)} now? Type a duration (up to 8h, minutes 15m, 30m or 45m: 1h, 45m, 2h15m), optionally followed by a note. Enter skips, q stops.`));
+  let logged = 0, count = 0;
+  const unsure = [];
+  const done = (dur) => { logged += dur.hours; count++; };
+  try {
+    tasks: for (const t of missing) {
+      console.log(`\n${wpLink(t.id)} ${t.subject} ${dim('· ' + t.actions.join(', '))}`);
+      for (;;) {
+        const line = await ask('  time › ');
+        if (line === null || /^q(uit)?$/i.test(line.trim())) break tasks;
+        const [first, ...rest] = line.trim().split(/\s+/);
+        if (!first) break;
+        const dur = durationOf(first);
+        if (!dur) { console.log(red('  ✗ ') + `use ${DURATION_HELP}`); continue; }
+        try {
+          const e = await createEntry({ id: t.id, dur, date, note: rest.join(' '), activity, soft: true });
+          console.log(green('  ✓ ') + `Logged ${bold(fmtHours(dur.hours))} ${dim(`· ${cell(e._links.activity?.title) || activityName(activity)} · entry #${e.id}`)}`);
+          done(dur);
+        } catch (err) {
+          if (!err.ambiguous) { console.log(red('  ✗ ') + err.message); continue; }
+          // The request may have gone through. Look before offering a retry, so nothing is logged twice
+          // (these tasks had no time that day, so any entry on one is the one we just sent).
+          let saved = null;
+          try { saved = (await fetchEntries(meId, date, { soft: true })).some((x) => x._links.workPackage?.href?.endsWith('/' + t.id)); } catch {}
+          if (saved) { console.log(green('  ✓ ') + `Logged ${bold(fmtHours(dur.hours))} ${dim('· saved despite a connection error')}`); done(dur); }
+          else if (saved === null) { console.log(yellow('  ? ') + "Couldn't tell whether it was saved. Check before logging it again."); unsure.push(t.id); }
+          else { console.log(red('  ✗ ') + 'Not saved (connection problem). Try again, or press Enter to skip.'); continue; }
+        }
+        break;
+      }
+    }
+  } finally {
+    rl.close();
+    console.log(count ? `\nLogged ${bold(fmtHours(logged))} across ${count} task${count === 1 ? '' : 's'}.` : '\nNothing logged.');
+    if (unsure.length) console.log(yellow(`Not sure these were saved: ${unsure.map((id) => '#' + id).join(', ')}. Check with: st log ${date}`));
+  }
+}
+
+async function comment(id, text) {
+  loader.start(`Posting comment on task #${id}…`);
+  const a = await api(`/work_packages/${id}/activities`, {}, { method: 'POST', body: { comment: { raw: text } } });
+  loader.stop();
+  console.log(`${green('Comment')} ${link(`${BASE}/work_packages/${id}/activity#activity-${a.version}`, cyan('#' + a.id))} added to task ${wpLink(id)}`);
+}
+
+async function changeStatus(opts) {
+  const spec = STATUS_CMDS[opts.cmd], id = opts.id;
+  loader.start(`Updating task #${id}…`);
+  const w = await api(`/work_packages/${id}`);
+  const from = cell(w._links.status?.title);
+  if (!opts.force && spec.from && !spec.from.some((s) => s.toLowerCase() === from.toLowerCase())) {
+    die(`Task #${id} is "${from}", and ${opts.cmd} only applies to ${spec.from.join(' or ')} tasks. Add --force to change it anyway.`);
+  }
+  const target = spec.to && (await api('/statuses'))._embedded.elements.find((s) => s.name.toLowerCase() === spec.to.toLowerCase());
+  if (spec.to && !target) die(`This OpenProject has no "${spec.to}" status.`);
+
+  let who = null;
+  if (opts.who) {
+    const query = opts.who.join(' '), people = [], project = w._links.project?.href;
+    if (!project) die(`Task #${id} has no project, so there is nobody to assign it to.`);
+    for (let offset = 1; ; offset++) {
+      const page = await api(project.replace(/^\/api\/v3/, '') + '/available_assignees', { pageSize: '100', offset: String(offset) }, { soft: true })
+        .catch((e) => die(`Can't list the people task #${id} can be assigned to: ${e.message}`));
+      people.push(...page._embedded.elements);
+      if (people.length >= page.total || page._embedded.elements.length === 0) break;
+    }
+    const hits = matchName(people, query, (u) => cell(u.name));
+    if (!hits.length) die(`Nobody who can be assigned to task #${id} matches "${query}".`);
+    if (hits.length > 1) die(`"${query}" matches ${hits.length} people: ${hits.slice(0, 8).map((u) => cell(u.name)).join(', ')}${hits.length > 8 ? ', …' : ''}. Be more specific.`);
+    who = hits[0];
+  } else if (spec.takeOver && opts.force) who = await api('/users/me'); // taking a task back
+
+  await api(`/work_packages/${id}`, {}, {
+    method: 'PATCH',
+    body: { lockVersion: w.lockVersion, _links: { ...(target && { status: { href: target._links.self.href } }), ...(who && { assignee: { href: who._links.self.href } }) } },
+  });
+  loader.stop();
+  const to = target ? cell(target.name) : from;
+  const assigned = who ? `assigned to ${bold(cell(who.name))}` : '';
+  console.log(`${wpLink(id)} ${target ? `${statusColor(from)(from)} → ${statusColor(to)(to)}${assigned ? ', ' : ''}` : `${statusColor(from)(from)}, `}${assigned}`);
+}
+
 // Tell the user when the upstream repo has commits they haven't pulled. The check is a local
 // rev-list against the last fetched state; a throttled background `git fetch` keeps that fresh
 // (FETCH_HEAD's mtime is the throttle), so there is never any added latency.
@@ -502,15 +772,23 @@ function updateNotice() {
 process.stdout.on('error', (e) => (e.code === 'EPIPE' ? process.exit(0) : Promise.reject(e)));
 
 const opts = parseArgs(process.argv.slice(2));
-if (opts.cmd === 'help') {
-  console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 13).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
-} else if (opts.cmd === 'log') {
-  await worklog(opts);
-} else if (opts.cmd === 'show') {
-  await show(opts.id);
-} else if (opts.cmd === 'open') {
-  execFile(process.platform === 'darwin' ? 'open' : 'xdg-open', [`${BASE}/work_packages/${opts.id}`]);
-} else {
-  await list(opts);
+try {
+  if (opts.cmd === 'help') {
+    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 20).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+  } else if (opts.cmd === 'log') {
+    await (opts.id ? logTime(opts) : worklog(opts));
+  } else if (opts.cmd === 'comment') {
+    await comment(opts.id, opts.message);
+  } else if (Object.hasOwn(STATUS_CMDS, opts.cmd)) {
+    await changeStatus(opts);
+  } else if (opts.cmd === 'show') {
+    await show(opts.id);
+  } else {
+    await list(opts);
+  }
+} catch (e) {
+  // Anything unexpected becomes a one-line error; ST_DEBUG=1 shows the stack.
+  if (process.env.ST_DEBUG) console.error(e?.stack);
+  die(e?.message || String(e));
 }
-if (!['help', 'open'].includes(opts.cmd) && !opts.json && !opts.text) updateNotice();
+if (opts.cmd !== 'help' && !opts.json && !opts.text) updateNotice();

@@ -1,6 +1,6 @@
 # st-tasks
 
-A small command-line tool for checking the [OpenProject](https://www.openproject.org/) work packages assigned to you. It lists your open tasks, flags the ones that are new or changed since your last check, shows task details and comments, and sums up the time you logged on a given day.
+A small command-line tool for checking the [OpenProject](https://www.openproject.org/) work packages assigned to you. It lists your open tasks, flags the ones that are new or changed since your last check, shows task details and comments, sums up the time you logged on a given day, and lets you comment, log time and change a task's status without opening the browser.
 
 It is a single Node.js script with no dependencies and talks to the OpenProject API v3. It defaults to `https://projects.sourcetop.com` but works with any OpenProject instance.
 
@@ -12,6 +12,7 @@ It is a single Node.js script with no dependencies and talks to the OpenProject 
 - **Task details:** description, status, and the last 5 comments from the terminal.
 - **Daily work log:** total time and tasks per day, plus a paste-ready "Working on:" list.
 - **Missing time finder:** `st log --miss` lists tasks you commented on or moved to a new status but haven't logged time for.
+- **Write from the terminal:** `st comment`, `st log <id> 1h30m` and status shortcuts like `st start`, `st qa` and `st close`.
 - **Update notice:** tells you when a `git pull` is available.
 - **Script-friendly:** `--json` output, no colors or truncation when piped, and no dependencies.
 
@@ -46,9 +47,15 @@ If you skip `npm link`, run the script directly with `./st-tasks.js` or `node st
 | --- | --- |
 | `st` | List the open tasks assigned to you |
 | `st show <id>` | Show one task: details, description and recent comments |
-| `st open <id>` | Open a task in your browser |
 | `st log [date]` | Show the time you logged on a day |
 | `st log --miss` | Find tasks you worked on but didn't log time for |
+| `st log <id> <duration> ["note"]` | Log time on a task |
+| `st comment <id> "text"` | Post a comment on a task |
+| `st start <id>` | Move a task from Open to In progress (`--force`: from any status, and assign it to you) |
+| `st qa <id> <user>` | Move a task to QA and assign it to `<user>` (also `question`, `at_client`) |
+| `st close <id>` | Move a task to Closed |
+| `st open <id> [user]` | Move a task to Open, and assign it to `<user>` if given (`--force`: to you) |
+| `st assign <id> <user>` | Assign a task to `<user>` and nothing else |
 | `st --help` | Print a short usage summary |
 
 The examples use `st`. After `npm link`, `st-tasks` and `st-task` work too: all three run the same script and take the same arguments. To remove an alias, delete it from `bin` in `package.json` and run `npm link` again.
@@ -84,14 +91,6 @@ Prints the task's title, project, type, status, priority, assignee, author, due 
 
 ```sh
 st show 1234
-```
-
-### `st open <id>`: open a task in the browser
-
-Opens `/work_packages/<id>` in your default browser (`open` on macOS, `xdg-open` on Linux).
-
-```sh
-st open 1234
 ```
 
 ### `st log [date]`: your work log
@@ -132,6 +131,47 @@ Working on:
 
 If nothing was logged, it prints `No time logged on <date>.`
 
+### `st log <id> <duration>`: log time on a task
+
+```sh
+st log 20897 1h30m                       # today
+st log 20897 45m "fixed the menu"        # with a note
+st log 20897 2h yesterday                # on another day (same dates as above)
+st log 20897 1h --as qa                  # with a different activity
+```
+
+Put the date right after the duration. The first other word starts the note and everything after it is the note, including words like `close`, `-1` or `today`, so `st log 20897 1h fixed -1 bug` keeps `-1` in the note. To start a note with a dash, put `--` before it: `st log 20897 1h -- -1 was wrong`.
+
+The duration is limited to what the "Log time" form offers: up to 8 hours plus 15, 30 or 45 minutes, written as `1h`, `45m` or `2h15m` (minutes can only be 15m, 30m or 45m, and the maximum is 8h45m). The command prints the entry and your total for that day.
+
+The activity (Developer, Senior Developer, QA, Project Management, Design / Wireframe, Other) is the one on your latest time entry, falling back to Developer. `--as <name>` picks another; a part of the name is enough (`--as senior`).
+
+### `st comment <id> "text"`: post a comment
+
+```sh
+st comment 20897 "Fixed on staging, ready for review"
+```
+
+Everything after the ID is the comment, even words like `close` or `--json`, and the command prints `Comment #<n> added to task #<id>`.
+
+### Status shortcuts
+
+| Command | Moves the task to | Assigns it |
+| --- | --- | --- |
+| `st start <id>` | In progress (from Open) | you, with `--force` |
+| `st qa <id> <user>` | QA | `<user>` |
+| `st question <id> <user>` | Question | `<user>` |
+| `st at_client <id> <user>` | At Client | `<user>` |
+| `st close <id>` | Closed | |
+| `st open <id> [user]` | Open (from any status) | `<user>` if given, you with `--force` |
+| `st assign <id> <user>` | (unchanged) | `<user>` |
+
+They only apply to tasks in the expected status: `start` to Open tasks, `qa`, `question`, `at_client` and `close` to Open or In progress ones. `st open` works from any status. Add `--force` to change a task in any other status.
+
+`--force` is also how you take a task back. `st start <id> --force` moves it to In progress from any status (for example when it comes back from QA) and assigns it to you, and `st open <id> --force` does the same with Open. `st assign <id> <user>` only changes the assignee, whatever the status.
+
+`<user>` is matched against the people who can be assigned to that task: a part of the name is enough (`st qa 20897 foysal`), and if it matches nobody or more than one person, nothing changes. `st open 20897` without a user or `--force` only changes the status and leaves the assignee alone. Each command prints the change, for example `#20897 In progress → QA, assigned to Abu Foysal`. The IDs in the output are clickable links to the task in the browser.
+
 ### `st log --miss`: find missing log time
 
 A reminder for forgotten entries. It shows the tasks where you left a comment or changed the status on that day, on any project and whatever the assignee, but have no time entry that day. Use it with any date.
@@ -151,6 +191,8 @@ The output is a table with the task (ID, Project, Subject), what you did (`Comme
 │ #20932 │ Site Maintenance │ Stripe security update │ Commented, Status → At Client │ + Log │
 ╰────────┴──────────────────┴────────────────────────┴───────────────────────────────┴───────╯
 ```
+
+In a terminal it then goes through the tasks one at a time and offers to log the time right there: type a duration such as `1h` or `45m` (up to 8h, minutes 15m, 30m or 45m), optionally followed by a note (`45m fixed the menu`), and press Enter. Press Enter on its own to skip a task and `q` to stop. The entry is logged on the day you are checking, with the same activity as `st log <id>` (see below). When the output is piped, or with `--json`, nothing is asked. Ctrl-C or Ctrl-D stops cleanly and still prints what was logged. If a request fails in a way that might have saved the entry (a timeout, a dropped connection), the tool checks before letting you try again, so nothing is logged twice.
 
 It also finds tasks that were updated by someone else after that day. It skips tasks you already logged time on, and it reads the activity of the rest, so it only runs when you ask for it. The first run for an old date can take a while (about 40 seconds for two weeks back); your activity is cached in `.cache.json`, so later runs, for any date, take a few seconds. With `--json` the list is added as `missingLogTime`. `--text` ignores the flag.
 
@@ -173,6 +215,13 @@ Update available (2 new commits). Run: git -C /path/to/st-tasks pull
 ```
 
 It compares against the last fetched state, and a background `git fetch` refreshes that at most every 6 hours, so it never slows a command down. The notice shows one run after a new commit lands. It's skipped when output is piped, with `--json` / `--text`, with `NO_COLOR` set, or if the checkout has no upstream branch.
+
+### Errors
+
+- Failed requests print one readable line (for example `Task #123 not found, or you don't have access to it.`), and the server's own reason when it rejects a change (`Time entry: Hours is too large.`).
+- Requests time out after 30 seconds. When a change may have reached the server anyway, the message says so: check with `st show <id>` or `st log` before trying again.
+- If the day's total can't be fetched after `st log <id>` saved the entry, you get a warning, not an error, because the entry exists.
+- Set `ST_DEBUG=1` to see a stack trace for an unexpected error.
 
 ### Output
 
