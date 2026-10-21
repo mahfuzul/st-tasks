@@ -14,10 +14,10 @@
 //   st-tasks log <id> 1h30m ["note"] [date] [--as qa]   log time (up to 8h; minutes 15m/30m/45m) on a task; default today, my usual activity
 //   st-tasks comment <id> "text"                        post a comment on a task
 //   st-tasks start <id>                                 Open -> In progress (with --force: from any status, assigned to me)
-//   st-tasks qa <id> <user>                             Open/In progress -> QA, assigned to <user> (also: question, at_client)
+//   st-tasks qa <id> [user]                             Open/In progress -> QA, assigned to <user>, asked for if left out (also: question, at_client)
 //   st-tasks close <id>                                 Open/In progress -> Closed (add --force to skip the status check)
 //   st-tasks open <id> [user]                           any status -> Open, assigned to <user> if given (--force: to me)
-//   st-tasks assign <id> <user>                         assign to <user> only, status unchanged
+//   st-tasks assign <id> [user]                         assign to <user> only, status unchanged; asked for if left out
 
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -216,7 +216,11 @@ function parseArgs(argv) {
   const idCmds = ['show', 'comment', ...Object.keys(STATUS_CMDS)];
   if (idCmds.includes(opts.cmd) && !/^\d+$/.test(opts.id || '')) die(`usage: st-tasks ${opts.cmd} <id>${opts.cmd === 'comment' ? ' "text"' : spec?.user === 'required' ? ' <user>' : spec?.user ? ' [user]' : ''}`);
   if (opts.cmd === 'comment' && !opts.message) die('usage: st-tasks comment <id> "text"');
-  if (spec?.user === 'required' && !opts.who) die(`usage: st-tasks ${opts.cmd} <id> <user>`);
+  if (spec?.user === 'required' && !opts.who) {
+    // On a terminal, ask for the name once the task has been checked; otherwise there is nobody to ask.
+    if (!process.stdin.isTTY || !process.stdout.isTTY) die(`usage: st-tasks ${opts.cmd} <id> <user>`);
+    opts.askWho = true;
+  }
   if (spec && !spec.user && opts.who) die(`unknown argument: ${opts.who[0]}`);
   if (opts.cmd === 'log' && opts.id && !opts.duration) die('usage: st-tasks log <id> <duration> ["note"] [date]   e.g. st-tasks log 123 1h30m "fixed the bug"');
   return opts;
@@ -713,6 +717,20 @@ async function comment(id, text) {
   console.log(`${green('Comment')} ${link(`${BASE}/work_packages/${id}/activity#activity-${a.version}`, cyan('#' + a.id))} added to task ${wpLink(id)}`);
 }
 
+// Ask one question on a terminal. Resolves undefined when the prompt is cancelled (Ctrl-C, Ctrl-D).
+async function promptLine(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const closed = new Promise((resolve) => rl.once('close', () => resolve(undefined)));
+  rl.on('SIGINT', () => rl.close());
+  try {
+    return await Promise.race([rl.question(question), closed]);
+  } catch {
+    return undefined;
+  } finally {
+    rl.close();
+  }
+}
+
 async function changeStatus(opts) {
   const spec = STATUS_CMDS[opts.cmd], id = opts.id;
   loader.start(`Updating task #${id}…`);
@@ -723,6 +741,18 @@ async function changeStatus(opts) {
   }
   const target = spec.to && (await api('/statuses'))._embedded.elements.find((s) => s.name.toLowerCase() === spec.to.toLowerCase());
   if (spec.to && !target) die(`This OpenProject has no "${spec.to}" status.`);
+
+  if (opts.askWho) {
+    loader.stop();
+    const name = (await promptLine(`Assign task #${id} to (name): `))?.trim();
+    if (name === undefined) {
+      console.log(); // the cursor is still after the prompt
+      die('Cancelled. Nothing was changed.');
+    }
+    if (!name) die('No user given. Nothing was changed.');
+    opts.who = name.split(/\s+/);
+    loader.start(`Updating task #${id}…`);
+  }
 
   let who = null;
   if (opts.who) {

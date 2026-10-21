@@ -73,6 +73,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 ## Argument parsing and error handling
 
 - **Only the first word picks the command** (`parseArgs()`). Later words belong to that command and can never switch to another one: `st log 1 1h close 2` is a note, `st assign 5 John open` is a name. This matters because the commands write. To test the parser, slice `STATUS_CMDS` up to `fetchAssigned` (plus `parseDuration`) out of the file and run it with a stubbed `die`. Never test it through the CLI: a successful parse goes on to write.
+- **Missing `<user>`** (`qa`, `question`, `at_client`, `assign`; `user: 'required'` in `STATUS_CMDS`): on a TTY `parseArgs()` sets `opts.askWho` and `changeStatus()` asks with `promptLine()` after the status guard, so a refused task never asks. Empty or cancelled input dies without writing. Without a TTY it is the usage error.
 - `st log <id>`: after the duration and an optional date, the first other word starts the note and **everything after it is note**, including `-1` and `today`. `--` lets a note start with a dash.
 - `api()` has a 30 s timeout. A thrown error carries `ambiguous` when a write may have been applied (timeout, dropped connection, 5xx; not refused/unresolvable). Writes add "check before trying again" to the message; `offerLogging()` re-reads the day's entries before offering a retry. Never retry a write blindly.
 - After a successful write, follow-up reads must not fail the command: `logTime()` prints a warning if the day's total can't be fetched.

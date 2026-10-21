@@ -52,10 +52,10 @@ If you skip `npm link`, run the script directly with `./st-tasks.js` or `node st
 | `st log <id> <duration> ["note"]` | Log time on a task |
 | `st comment <id> "text"` | Post a comment on a task |
 | `st start <id>` | Move a task from Open to In progress (`--force`: from any status, and assign it to you) |
-| `st qa <id> <user>` | Move a task to QA and assign it to `<user>` (also `question`, `at_client`) |
+| `st qa <id> [user]` | Move a task to QA and assign it to `<user>`, which it asks for if you leave it out (also `question`, `at_client`) |
 | `st close <id>` | Move a task to Closed |
 | `st open <id> [user]` | Move a task to Open, and assign it to `<user>` if given (`--force`: to you) |
-| `st assign <id> <user>` | Assign a task to `<user>` and nothing else |
+| `st assign <id> [user]` | Assign a task to `<user>` and nothing else; asks for the name if you leave it out |
 | `st --help` | Print a short usage summary |
 
 The examples use `st`. After `npm link`, `st-tasks` and `st-task` work too: all three run the same script and take the same arguments. To remove an alias, delete it from `bin` in `package.json` and run `npm link` again.
@@ -169,6 +169,8 @@ Everything after the ID is the comment, even words like `close` or `--json`, and
 They only apply to tasks in the expected status: `start` to Open tasks, `qa`, `question`, `at_client` and `close` to Open or In progress ones. `st open` works from any status. Add `--force` to change a task in any other status.
 
 `--force` is also how you take a task back. `st start <id> --force` moves it to In progress from any status (for example when it comes back from QA) and assigns it to you, and `st open <id> --force` does the same with Open. `st assign <id> <user>` only changes the assignee, whatever the status.
+
+If you leave out `<user>` for `qa`, `question`, `at_client` or `assign`, the command asks for the name (`Assign task #20897 to (name):`) once it has checked the task. An empty answer, Ctrl-C or Ctrl-D stops with an error and changes nothing. When the input isn't a terminal, for example in a script, it prints the usage message instead of asking.
 
 `<user>` is matched against the people who can be assigned to that task: a part of the name is enough (`st qa 20897 foysal`), and if it matches nobody or more than one person, nothing changes. `st open 20897` without a user or `--force` only changes the status and leaves the assignee alone. Each command prints the change, for example `#20897 In progress → QA, assigned to Abu Foysal`. The IDs in the output are clickable links to the task in the browser.
 
