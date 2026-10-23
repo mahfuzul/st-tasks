@@ -367,6 +367,7 @@ function selectKey(state, key) {
   if (key.name === 'down' || (key.ctrl && key.name === 'n')) return { ...state, index: Math.min(state.index + 1, Math.max(state.filtered.length - 1, 0)) };
   if (key.name === 'return') return state.filtered.length ? { done: state.filtered[Math.min(state.index, state.filtered.length - 1)].value } : state;
   if (key.name === 'escape' || (key.ctrl && key.name === 'c')) return { cancelled: true };
+  if (key.name === 'q' && !key.ctrl && !key.meta && !state.filter) return { cancelled: true }; // only as the first key, so "aq" still filters
   if (key.name === 'backspace') return filterSelect(state, state.filter.slice(0, -1));
   if (key.ctrl && key.name === 'u') return filterSelect(state, '');
   if (!key.ctrl && !key.meta && key.sequence && key.sequence.length === 1 && key.sequence >= ' ') return filterSelect(state, state.filter + key.sequence);
@@ -375,7 +376,7 @@ function selectKey(state, key) {
 
 // The widget as lines of text: a header with the filter, then up to `height` windowed rows.
 function selectLines(state, { title, cols = Infinity, height = 10 } = {}) {
-  let head = bold(title) + (state.filter ? '  ' + cyan(state.filter) : dim('  (type to filter, ↑/↓, enter, esc)'));
+  let head = bold(title) + (state.filter ? '  ' + cyan(state.filter) : dim('  (type to filter, ↑/↓, enter, esc/q)'));
   if (stripAnsi(head).length > cols) head = stripAnsi(head).slice(0, Math.max(0, cols - 1)) + '…';
   const lines = [head];
   const list = state.filtered;
