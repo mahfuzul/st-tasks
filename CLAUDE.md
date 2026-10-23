@@ -22,7 +22,8 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 | `st qa/question/at_client <id> <user>` | `changeStatus()` | **Writes.** Status + assignee; the user is required. Table in `STATUS_CMDS` |
 | `st open <id> [user]` | `changeStatus()` | **Writes.** Status to Open from any status; assigns when a user is given (`--force` without one assigns to me, like `start --force`: `takeOver`). There is no browser-opening command any more: task IDs are OSC 8 links |
 | `st assign <id> <user>` | `changeStatus()` | **Writes.** Assignee only (`to: null` in `STATUS_CMDS`), any status, no status check |
-| `st --help` | inline | Prints the header comment lines of `st-tasks.js` (`.split('\n').slice(1, 24)`). **Update that slice if you add or remove usage lines.** |
+| `st -i` / `--interactive` | `interactive()` | Terminal only; no other command or option. Task `select()` → action menu (`interactiveTask()`) → back. Esc backs out one level, exits at the list |
+| `st --help` | inline | Prints the header comment lines of `st-tasks.js` (`.split('\n').slice(1, 25)`). **Update that slice if you add or remove usage lines.** |
 
 ## Output (requested by the user, keep as is)
 
@@ -59,6 +60,8 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 - **Interactive widgets** (section marked `---- Interactive widgets ----` in `st-tasks.js`): zero-dependency, terminal only. `select()` is an arrow-key list with type-to-filter on raw stdin (`emitKeypressEvents` + `setRawMode`, Esc/Ctrl-C cancels, `Ctrl-P/N` move, `Ctrl-U` clears the filter, a `decorate` hook adds synthetic rows like "use task #N anyway"); its core (`selectState`/`selectKey`/`selectLines`/`filterItems`) is pure and testable by slicing the section out of the file. `input()` is a validated one-line prompt over `promptLine()`. Derived pickers: `taskPicker()`, `personPicker()`, `logWizard()`. The widget erases itself after a choice and echoes it on one line; the cursor is hidden while active and always restored.
 
 - **Untrusted text:** subjects, comments, project and user names are written by other OpenProject users. Pass every API string through `cell()` (one line, for table cells and headers) or `safe()` / `decode()` (multi-line, for descriptions and comments) where it enters the program. They strip control characters and bidi overrides so content can't inject terminal escape sequences (fake OSC 8 links, OSC 52 clipboard writes).
+
+- **Interactive mode (`st -i`):** `interactive()` sets `inSession`, which makes `die()` throw instead of exiting, so any failed action (status guard, API error, even inside `show()`/`logTime()`) prints one line and returns to the menu. Cancelled wizards throw an error with `cancelled: true`, which is swallowed silently. A status change returns to a refetched list; `applyFlagsAndSnapshot()` (shared with `list()`) counts the session as a check. Test it by piping keystrokes (`\r`, `\033`, `\033[B`, with ~1s sleeps) into a Node wrapper that fakes `isTTY`/`setRawMode`, against a mock server.
 
 ## Write commands
 

@@ -18,6 +18,7 @@
 //   st-tasks close <id>                                 Open/In progress -> Closed (add --force to skip the status check)
 //   st-tasks open <id> [user]                           any status -> Open, assigned to <user> if given (--force: to me)
 //   st-tasks assign <id> [user]                         assign to <user> only, status unchanged; asked for if left out
+//   st-tasks -i                                         interactive mode: pick a task, choose an action, repeat
 //
 // On a terminal, anything left out (task id, user, comment text, log duration) is asked for:
 // arrow-key lists with type-to-filter for tasks and people, short prompts for the rest.
@@ -94,8 +95,11 @@ const loader = (() => {
   return self;
 })();
 
+// Interactive mode (`st -i`) sets this so a failed action throws back to its menu instead of exiting.
+let inSession = false;
 function die(msg) {
   loader.stop();
+  if (inSession) throw new Error(msg);
   console.error(red('error: ') + msg);
   process.exit(1);
 }
@@ -177,6 +181,7 @@ function parseArgs(argv) {
     const a = argv[i], flag = literal ? null : a;
     if (flag === '--') literal = true;
     else if (flag === '--all' || flag === '-a') opts.all = true;
+    else if (flag === '--interactive' || flag === '-i') opts.interactive = true;
     else if (flag === '--json') opts.json = true;
     else if (flag === '--text') opts.text = true;
     else if (flag === '--miss') opts.miss = true;
@@ -239,6 +244,11 @@ function parseArgs(argv) {
   if (opts.cmd === 'log' && opts.id && !opts.duration) {
     if (canAsk) opts.askLog = true;
     else die('usage: st-tasks log <id> <duration> ["note"] [date]   e.g. st-tasks log 123 1h30m "fixed the bug"');
+  }
+  if (opts.interactive) {
+    if (opts.cmd !== 'list' || opts.json || opts.text || opts.miss || opts.all || opts.project || opts.status) die('interactive mode (-i) does not combine with a command or other options');
+    if (!canAsk) die('interactive mode needs a terminal');
+    opts.cmd = 'interactive';
   }
   return opts;
 }
@@ -365,7 +375,9 @@ function selectKey(state, key) {
 
 // The widget as lines of text: a header with the filter, then up to `height` windowed rows.
 function selectLines(state, { title, cols = Infinity, height = 10 } = {}) {
-  const lines = [bold(title) + (state.filter ? '  ' + cyan(state.filter) : dim('  (type to filter, ↑/↓, enter, esc)'))];
+  let head = bold(title) + (state.filter ? '  ' + cyan(state.filter) : dim('  (type to filter, ↑/↓, enter, esc)'));
+  if (stripAnsi(head).length > cols) head = stripAnsi(head).slice(0, Math.max(0, cols - 1)) + '…';
+  const lines = [head];
   const list = state.filtered;
   const start = Math.max(0, Math.min(state.index - (height >> 1), list.length - height));
   for (let i = start; i < Math.min(start + height, list.length); i++) {
@@ -452,24 +464,30 @@ async function taskPicker({ includeClosed = false } = {}) {
   return id;
 }
 
-// Pick the person to assign to from the project's roster.
-async function personPicker(project, id) {
+// Pick the person to assign to from the project's roster. With `soft`, a cancelled picker
+// resolves undefined instead of exiting (interactive mode goes back to its menu).
+async function personPicker(project, id, soft) {
   loader.start('Fetching people…');
-  const people = await fetchAssignees(project, id);
+  const people = await fetchAssignees(project, id, soft);
   loader.stop();
   const u = await select({ title: `Assign #${id} to`, items: people.map((p) => ({ label: cell(p.name), value: p })) });
-  if (!u) die('Cancelled. Nothing was changed.');
+  if (!u && !soft) die('Cancelled. Nothing was changed.');
   return u;
 }
 
 // `st log <id>` without a duration: ask for the time, date, note and activity instead.
-async function logWizard(opts) {
+// With `soft`, cancelling throws a `cancelled` error instead of exiting (interactive mode).
+async function logWizard(opts, soft) {
+  const bail = (msg) => {
+    if (soft) throw Object.assign(new Error(msg), { cancelled: true });
+    die(msg);
+  };
   const duration = await input({ question: `Time on #${opts.id} (${DURATION_HELP}):`, validate: (v) => (durationOf(v) ? true : `use ${DURATION_HELP}`) });
-  if (!duration) die('Cancelled. Nothing was logged.');
+  if (!duration) bail('Cancelled. Nothing was logged.');
   const date = await input({ question: 'Date:', def: 'today', validate: (v) => (isDate(v) ? true : 'use today, yesterday, -N (days ago) or YYYY-MM-DD') });
-  if (date === null) die('Cancelled. Nothing was logged.');
+  if (date === null) bail('Cancelled. Nothing was logged.');
   const note = await input({ question: 'Note (optional):' });
-  if (note === null) die('Cancelled. Nothing was logged.');
+  if (note === null) bail('Cancelled. Nothing was logged.');
   loader.start('Checking your usual activity…');
   const me = await api('/users/me');
   const def = await defaultActivity(me.id);
@@ -479,13 +497,26 @@ async function logWizard(opts) {
     items: ACTIVITIES.map(([id, name]) => ({ label: name, hint: activityHref(id) === def ? 'your latest' : '', value: name }))
       .sort((a, b) => (a.hint ? -1 : b.hint ? 1 : 0)),
   });
-  if (!activity) die('Cancelled. Nothing was logged.');
+  if (!activity) bail('Cancelled. Nothing was logged.');
   opts.duration = duration;
   opts.date = date === 'today' ? undefined : date;
   if (note) opts.noteWords = [note];
   opts.as = activity; // an exact ACTIVITIES name, resolved by activityByName() in logTime()
 }
 // ---- End of interactive widgets ----
+
+// NEW/UPD flags from the last-check snapshot, and refresh the snapshot on an unfiltered
+// view of open tasks. Returns the previous snapshot (null on the first run).
+function applyFlagsAndSnapshot(tasks, { all, project, status }) {
+  const prev = loadState();
+  const seen = prev?.tasks || {};
+  // The snapshot only holds open tasks, so flags are meaningless for --all.
+  for (const t of tasks) t.flag = !prev || all ? '' : !(t.id in seen) ? 'NEW' : seen[t.id] !== t.updatedAt ? 'UPD' : '';
+  if (!all && !project && !status) {
+    writeFileSync(STATE_FILE, JSON.stringify({ checkedAt: new Date().toISOString(), tasks: Object.fromEntries(tasks.map((t) => [t.id, t.updatedAt])) }, null, 2));
+  }
+  return prev;
+}
 
 async function list(opts) {
   loader.start('Fetching your tasks…');
@@ -494,15 +525,7 @@ async function list(opts) {
   if (opts.project) tasks = tasks.filter((t) => t.project.toLowerCase().includes(opts.project.toLowerCase()));
   if (opts.status) tasks = tasks.filter((t) => t.status.toLowerCase().includes(opts.status.toLowerCase()));
 
-  const prev = loadState();
-  const seen = prev?.tasks || {};
-  // The snapshot only holds open tasks, so flags are meaningless for --all.
-  for (const t of tasks) t.flag = !prev || opts.all ? '' : !(t.id in seen) ? 'NEW' : seen[t.id] !== t.updatedAt ? 'UPD' : '';
-
-  // Only an unfiltered view of open tasks updates the "last checked" snapshot.
-  if (!opts.all && !opts.project && !opts.status) {
-    writeFileSync(STATE_FILE, JSON.stringify({ checkedAt: new Date().toISOString(), tasks: Object.fromEntries(tasks.map((t) => [t.id, t.updatedAt])) }, null, 2));
-  }
+  const prev = applyFlagsAndSnapshot(tasks, opts);
 
   if (opts.json) return console.log(JSON.stringify(tasks, null, 2));
 
@@ -826,7 +849,7 @@ async function logTime(opts) {
   loader.start(`Logging time on task #${opts.id}…`);
   const me = await api('/users/me');
   activity ||= await defaultActivity(me.id);
-  const e = await createEntry({ id: opts.id, dur, date, note, activity });
+  const e = await createEntry({ id: opts.id, dur, date, note, activity, soft: opts.soft });
   loader.stop();
   const title = cell(e._links.workPackage?.title), act = cell(e._links.activity?.title);
   console.log(`${green('Logged')} ${bold(fmtHours(dur.hours))} on ${wpLink(opts.id)}${title ? ' ' + title : ''} ${dim(`(${date}${act ? ', ' + act : ''}) · entry #${e.id}`)}`);
@@ -889,9 +912,9 @@ async function offerLogging(missing, date, meId, activity) {
   }
 }
 
-async function comment(id, text) {
+async function comment(id, text, soft) {
   loader.start(`Posting comment on task #${id}…`);
-  const a = await api(`/work_packages/${id}/activities`, {}, { method: 'POST', body: { comment: { raw: text } } });
+  const a = await api(`/work_packages/${id}/activities`, {}, { method: 'POST', soft, body: { comment: { raw: text } } });
   loader.stop();
   console.log(`${green('Comment')} ${link(`${BASE}/work_packages/${id}/activity#activity-${a.version}`, cyan('#' + a.id))} added to task ${wpLink(id)}`);
 }
@@ -911,11 +934,12 @@ async function promptLine(question) {
 }
 
 // Everyone a task in this project can be assigned to (paged).
-async function fetchAssignees(project, id) {
+async function fetchAssignees(project, id, soft) {
+  const fail = soft ? (m) => { throw new Error(m); } : die;
   const people = [];
   for (let offset = 1; ; offset++) {
     const page = await api(project.replace(/^\/api\/v3/, '') + '/available_assignees', { pageSize: '100', offset: String(offset) }, { soft: true })
-      .catch((e) => die(`Can't list the people task #${id} can be assigned to: ${e.message}`));
+      .catch((e) => fail(`Can't list the people task #${id} can be assigned to: ${e.message}`));
     people.push(...page._embedded.elements);
     if (people.length >= page.total || page._embedded.elements.length === 0) break;
   }
@@ -924,20 +948,23 @@ async function fetchAssignees(project, id) {
 
 async function changeStatus(opts) {
   const spec = STATUS_CMDS[opts.cmd], id = opts.id;
+  // Soft mode (interactive session): throw instead of exiting, so a failed action returns to the menu.
+  const fail = opts.soft ? (m) => { throw new Error(m); } : die;
   loader.start(`Updating task #${id}…`);
-  const w = await api(`/work_packages/${id}`);
+  const w = await api(`/work_packages/${id}`, {}, { soft: opts.soft });
   const from = cell(w._links.status?.title);
   if (!opts.force && spec.from && !spec.from.some((s) => s.toLowerCase() === from.toLowerCase())) {
-    die(`Task #${id} is "${from}", and ${opts.cmd} only applies to ${spec.from.join(' or ')} tasks. Add --force to change it anyway.`);
+    fail(`Task #${id} is "${from}", and ${opts.cmd} only applies to ${spec.from.join(' or ')} tasks.${opts.soft ? '' : ' Add --force to change it anyway.'}`);
   }
-  const target = spec.to && (await api('/statuses'))._embedded.elements.find((s) => s.name.toLowerCase() === spec.to.toLowerCase());
-  if (spec.to && !target) die(`This OpenProject has no "${spec.to}" status.`);
+  const target = spec.to && (await api('/statuses', {}, { soft: opts.soft }))._embedded.elements.find((s) => s.name.toLowerCase() === spec.to.toLowerCase());
+  if (spec.to && !target) fail(`This OpenProject has no "${spec.to}" status.`);
 
   if (opts.askWho) {
     // After the status guard, so a refused task never asks. The picker sets the user directly.
     loader.stop();
-    const project = w._links.project?.href || die(`Task #${id} has no project, so there is nobody to assign it to.`);
-    opts.whoUser = await personPicker(project, id);
+    const project = w._links.project?.href || fail(`Task #${id} has no project, so there is nobody to assign it to.`);
+    opts.whoUser = await personPicker(project, id, opts.soft);
+    if (!opts.whoUser) return; // soft mode: picker cancelled, back to the menu
     loader.start(`Updating task #${id}…`);
   }
 
@@ -945,22 +972,100 @@ async function changeStatus(opts) {
   if (opts.whoUser) who = opts.whoUser;
   else if (opts.who) {
     const query = opts.who.join(' '), project = w._links.project?.href;
-    if (!project) die(`Task #${id} has no project, so there is nobody to assign it to.`);
-    const people = await fetchAssignees(project, id);
+    if (!project) fail(`Task #${id} has no project, so there is nobody to assign it to.`);
+    const people = await fetchAssignees(project, id, opts.soft);
     const hits = matchName(people, query, (u) => cell(u.name));
-    if (!hits.length) die(`Nobody who can be assigned to task #${id} matches "${query}".`);
-    if (hits.length > 1) die(`"${query}" matches ${hits.length} people: ${hits.slice(0, 8).map((u) => cell(u.name)).join(', ')}${hits.length > 8 ? ', …' : ''}. Be more specific.`);
+    if (!hits.length) fail(`Nobody who can be assigned to task #${id} matches "${query}".`);
+    if (hits.length > 1) fail(`"${query}" matches ${hits.length} people: ${hits.slice(0, 8).map((u) => cell(u.name)).join(', ')}${hits.length > 8 ? ', …' : ''}. Be more specific.`);
     who = hits[0];
   } else if (spec.takeOver && opts.force) who = await api('/users/me'); // taking a task back
 
   await api(`/work_packages/${id}`, {}, {
     method: 'PATCH',
+    soft: opts.soft,
     body: { lockVersion: w.lockVersion, _links: { ...(target && { status: { href: target._links.self.href } }), ...(who && { assignee: { href: who._links.self.href } }) } },
   });
   loader.stop();
   const to = target ? cell(target.name) : from;
   const assigned = who ? `assigned to ${bold(cell(who.name))}` : '';
   console.log(`${wpLink(id)} ${target ? `${statusColor(from)(from)} → ${statusColor(to)(to)}${assigned ? ', ' : ''}` : `${statusColor(from)(from)}, `}${assigned}`);
+}
+
+// ---- `st -i`: interactive mode ----
+
+// The action menu for one task. Handlers run in soft mode, so a failure prints inline and
+// returns to the menu instead of ending the session. Esc at the menu goes back to the list.
+async function interactiveTask(id, subject) {
+  const actions = [
+    { label: 'Show details', value: 'show' },
+    { label: 'Log time', value: 'log' },
+    { label: 'Comment', value: 'comment' },
+    ...Object.entries(STATUS_CMDS).map(([cmd, spec]) => ({
+      label: cmd.replace(/_/g, ' '),
+      hint: spec.to ? `→ ${spec.to}` + (spec.user ? ', assign' : '') : 'assign only',
+      value: cmd,
+    })),
+  ];
+  for (;;) {
+    const action = await select({ title: `#${id}${subject ? '  ' + subject : ''}`, items: actions });
+    if (action === null) return; // Esc: back to the task list
+    try {
+      if (action === 'show') {
+        await show(id);
+        await input({ question: dim('(enter to continue)') });
+      } else if (action === 'log') {
+        const o = { cmd: 'log', id, soft: true };
+        await logWizard(o, true);
+        await logTime(o);
+      } else if (action === 'comment') {
+        const text = await input({ question: `Comment on #${id}:` });
+        if (text) await comment(id, text, true);
+      } else {
+        const o = { cmd: action, id, soft: true };
+        if (STATUS_CMDS[action].user === 'required') {
+          loader.start(`Fetching task #${id}…`);
+          const w = await api(`/work_packages/${id}`, {}, { soft: true });
+          loader.stop();
+          const project = w._links.project?.href;
+          if (!project) throw new Error(`Task #${id} has no project, so there is nobody to assign it to.`);
+          const u = await personPicker(project, id, true);
+          if (!u) continue; // picker cancelled: back to the action menu
+          o.whoUser = u;
+        }
+        await changeStatus(o);
+        return; // status changed: back to a freshly fetched task list
+      }
+      console.log();
+    } catch (e) {
+      loader.stop();
+      if (!e.cancelled) console.error(red('error: ') + e.message);
+      console.log();
+    }
+  }
+}
+
+// Pick a task, act on it, repeat. Esc at the task list ends the session.
+async function interactive() {
+  inSession = true;
+  for (;;) {
+    loader.start('Fetching your tasks…');
+    const tasks = await fetchAssigned(false);
+    loader.stop();
+    if (!tasks.length) return console.log(green('No open tasks assigned to you.'));
+    applyFlagsAndSnapshot(tasks, {}); // a session counts as a check
+    const id = await select({
+      title: `Your open tasks (${tasks.length})`,
+      items: tasks.map((t) => ({
+        label: `${t.flag ? t.flag + ' ' : ''}#${t.id}  ${t.subject}`,
+        hint: `${t.project} · ${statusColor(t.status)(t.status)}`,
+        value: String(t.id),
+      })),
+      decorate: (filter, filtered) => (filtered.length || !/^\d+$/.test(filter.trim()) ? filtered : [{ label: `Use task #${filter.trim()}`, hint: 'not in this list', value: filter.trim() }]),
+    });
+    if (id === null) return;
+    const task = tasks.find((t) => String(t.id) === id);
+    await interactiveTask(id, task?.subject || '');
+  }
 }
 
 // Tell the user when the upstream repo has commits they haven't pulled. The check is a local
@@ -996,7 +1101,7 @@ try {
     opts.message = message;
   }
   if (opts.cmd === 'help') {
-    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 24).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 25).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
   } else if (opts.cmd === 'log') {
     await (opts.id ? logTime(opts) : worklog(opts));
   } else if (opts.cmd === 'comment') {
@@ -1005,6 +1110,8 @@ try {
     await changeStatus(opts);
   } else if (opts.cmd === 'show') {
     await show(opts.id);
+  } else if (opts.cmd === 'interactive') {
+    await interactive();
   } else {
     await list(opts);
   }

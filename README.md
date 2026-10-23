@@ -57,6 +57,7 @@ If you skip `npm link`, run the script directly with `./st-tasks.js` or `node st
 | `st close <id>` | Move a task to Closed |
 | `st open <id> [user]` | Move a task to Open, and assign it to `<user>` if given (`--force`: to you) |
 | `st assign <id> [user]` | Assign a task to `<user>` and nothing else; asks for the name if you leave it out |
+| `st -i` | Pick a task, choose an action (show, log, comment, status), repeat; Esc leaves the list |
 | `st --help` | Print a short usage summary |
 
 The examples use `st`. After `npm link`, `st-tasks` and `st-task` work too: all three run the same script and take the same arguments. To remove an alias, delete it from `bin` in `package.json` and run `npm link` again.
@@ -69,6 +70,8 @@ On a terminal, any argument you leave out is asked for instead of erroring:
 - `st qa`, `st question`, `st at_client` and `st assign` ask for the person from the project's assignable roster with the same type-to-filter list — no more guessing how a name is spelled.
 - `st comment <id>` without a text prompts for the comment.
 - `st log <id>` without a duration asks for the time, the date (today by default), an optional note and the activity, with your usual activity preselected.
+
+`st -i` goes further and keeps you in a loop: pick a task, then choose an action from a menu (show details, log time, comment, start, qa, question, at_client, close, open, assign). After an action that only reads or logs you return to the same menu; after a status change you get a freshly fetched task list. A refused or failed action prints its error and returns to the menu instead of leaving. `Esc` goes back one level and leaves at the task list. `-i` takes no other command or option and needs a terminal.
 
 `Esc` or `Ctrl-C` cancels any prompt and changes nothing. Without a terminal — in a script or a pipe — missing arguments are still strict usage errors, so scripts never hang.
 
