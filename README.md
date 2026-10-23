@@ -71,9 +71,9 @@ On a terminal, any argument you leave out is asked for instead of erroring:
 - `st comment <id>` without a text prompts for the comment.
 - `st log <id>` without a duration asks for the time, the date (today by default), an optional note and the activity, with your usual activity preselected.
 
-`st -i` goes further and keeps you in a loop: pick a task, then choose an action from a menu (show details, log time, comment, start, qa, question, at_client, close, open, assign). After an action that only reads or logs you return to the same menu; after a status change you get a freshly fetched task list. A refused or failed action prints its error and returns to the menu instead of leaving. `Esc` goes back one level and leaves at the task list. `-i` takes no other command or option and needs a terminal.
+`st -i` goes further and keeps you in a loop: pick a task, then choose an action from a menu (show details, log time, comment, start, qa, question, at_client, close, open, assign). After an action that only reads or logs you return to the same menu; after a status change you get a freshly fetched task list. A refused or failed action prints its error and returns to the menu instead of leaving. `Esc` goes back one level and leaves at the task list (`q` is just a filter letter). `-i` takes no other command or option and needs a terminal.
 
-`Esc`, `Ctrl-C` or (in a list, before you have typed anything) `q` cancels any prompt and changes nothing. Without a terminal — in a script or a pipe — missing arguments are still strict usage errors, so scripts never hang.
+`Esc` or `Ctrl-C` cancels any prompt and changes nothing. Without a terminal — in a script or a pipe — missing arguments are still strict usage errors, so scripts never hang.
 
 ### `st`: list your tasks
 
