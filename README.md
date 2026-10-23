@@ -13,6 +13,7 @@ It is a single Node.js script with no dependencies and talks to the OpenProject 
 - **Daily work log:** total time and tasks per day, plus a paste-ready "Working on:" list.
 - **Missing time finder:** `st log --miss` lists tasks you commented on or moved to a new status but haven't logged time for.
 - **Write from the terminal:** `st comment`, `st log <id> 1h30m` and status shortcuts like `st start`, `st qa` and `st close`.
+- **Interactive when you want it:** leave out a task id, user, comment text or log duration and pick from arrow-key lists with type-to-filter instead of memorizing ids and names (terminal only).
 - **Update notice:** tells you when a `git pull` is available.
 - **Script-friendly:** `--json` output, no colors or truncation when piped, and no dependencies.
 
@@ -60,6 +61,17 @@ If you skip `npm link`, run the script directly with `./st-tasks.js` or `node st
 
 The examples use `st`. After `npm link`, `st-tasks` and `st-task` work too: all three run the same script and take the same arguments. To remove an alias, delete it from `bin` in `package.json` and run `npm link` again.
 
+### Interactive prompts
+
+On a terminal, any argument you leave out is asked for instead of erroring:
+
+- `st show`, `st comment`, `st start`, `st qa`, `st close`, … without an `<id>` open a **task picker**: your open tasks in an arrow-key list. Type to filter by id, subject, project or status, `↑`/`↓` to move, `Enter` to pick, `Esc` to cancel. Typing digits that match nothing offers to use that task id directly. `st open` includes closed tasks, since you usually reopen one.
+- `st qa`, `st question`, `st at_client` and `st assign` ask for the person from the project's assignable roster with the same type-to-filter list — no more guessing how a name is spelled.
+- `st comment <id>` without a text prompts for the comment.
+- `st log <id>` without a duration asks for the time, the date (today by default), an optional note and the activity, with your usual activity preselected.
+
+`Esc` or `Ctrl-C` cancels any prompt and changes nothing. Without a terminal — in a script or a pipe — missing arguments are still strict usage errors, so scripts never hang.
+
 ### `st`: list your tasks
 
 Shows the open tasks assigned to you, most recently updated first. It starts with a summary line, such as "You have 11 open tasks: 7 Open, 3 In progress and 1 On hold", and says when you last checked.
@@ -87,7 +99,7 @@ The table has these columns: ID, Project, Subject, Status, Priority, Last update
 
 ### `st show <id>`: look at one task
 
-Prints the task's title, project, type, status, priority, assignee, author, due date, last updated time, link, description and the last 5 comments. `<id>` is the number in the task's URL (for the URL `.../work_packages/1234`, use `1234`).
+Prints the task's title, project, type, status, priority, assignee, author, due date, last updated time, link, description and the last 5 comments. Without an `<id>`, you pick the task from a list (see [Interactive prompts](#interactive-prompts)). `<id>` is the number in the task's URL (for the URL `.../work_packages/1234`, use `1234`).
 
 ```sh
 st show 1234
@@ -138,6 +150,7 @@ st log 20897 1h30m                       # today
 st log 20897 45m "fixed the menu"        # with a note
 st log 20897 2h yesterday                # on another day (same dates as above)
 st log 20897 1h --as qa                  # with a different activity
+st log 20897                             # asks for time, date, note and activity
 ```
 
 Put the date right after the duration. The first other word starts the note and everything after it is the note, including words like `close`, `-1` or `today`, so `st log 20897 1h fixed -1 bug` keeps `-1` in the note. To start a note with a dash, put `--` before it: `st log 20897 1h -- -1 was wrong`.
@@ -150,6 +163,7 @@ The activity (Developer, Senior Developer, QA, Project Management, Design / Wire
 
 ```sh
 st comment 20897 "Fixed on staging, ready for review"
+st comment                               # pick the task, then type the comment when asked
 ```
 
 Everything after the ID is the comment, even words like `close` or `--json`, and the command prints `Comment #<n> added to task #<id>`.
@@ -170,7 +184,7 @@ They only apply to tasks in the expected status: `start` to Open tasks, `qa`, `q
 
 `--force` is also how you take a task back. `st start <id> --force` moves it to In progress from any status (for example when it comes back from QA) and assigns it to you, and `st open <id> --force` does the same with Open. `st assign <id> <user>` only changes the assignee, whatever the status.
 
-If you leave out `<user>` for `qa`, `question`, `at_client` or `assign`, the command asks for the name (`Assign task #20897 to (name):`) once it has checked the task. An empty answer, Ctrl-C or Ctrl-D stops with an error and changes nothing. When the input isn't a terminal, for example in a script, it prints the usage message instead of asking.
+If you leave out `<user>` for `qa`, `question`, `at_client` or `assign`, the command shows the people the task can be assigned to in an arrow-key list once it has checked the task: type to filter, `Enter` to pick, `Esc` to cancel with nothing changed. When the input isn't a terminal, for example in a script, it prints the usage message instead of asking.
 
 `<user>` is matched against the people who can be assigned to that task: a part of the name is enough (`st qa 20897 foysal`), and if it matches nobody or more than one person, nothing changes. `st open 20897` without a user or `--force` only changes the status and leaves the assignee alone. Each command prints the change, for example `#20897 In progress → QA, assigned to Abu Foysal`. The IDs in the output are clickable links to the task in the browser.
 

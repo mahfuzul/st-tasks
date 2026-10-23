@@ -18,12 +18,17 @@
 //   st-tasks close <id>                                 Open/In progress -> Closed (add --force to skip the status check)
 //   st-tasks open <id> [user]                           any status -> Open, assigned to <user> if given (--force: to me)
 //   st-tasks assign <id> [user]                         assign to <user> only, status unchanged; asked for if left out
+//
+// On a terminal, anything left out (task id, user, comment text, log duration) is asked for:
+// arrow-key lists with type-to-filter for tasks and people, short prompts for the rest.
+// Esc cancels. Without a terminal these are strict usage errors, so scripts are unaffected.
 
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
+import { emitKeypressEvents } from 'node:readline';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = join(ROOT, '.state.json');
@@ -214,15 +219,27 @@ function parseArgs(argv) {
   }
   const spec = STATUS_CMDS[opts.cmd];
   const idCmds = ['show', 'comment', ...Object.keys(STATUS_CMDS)];
-  if (idCmds.includes(opts.cmd) && !/^\d+$/.test(opts.id || '')) die(`usage: st-tasks ${opts.cmd} <id>${opts.cmd === 'comment' ? ' "text"' : spec?.user === 'required' ? ' <user>' : spec?.user ? ' [user]' : ''}`);
-  if (opts.cmd === 'comment' && !opts.message) die('usage: st-tasks comment <id> "text"');
+  // On a terminal, missing pieces are asked for with pickers and prompts (see the widget
+  // section); elsewhere they stay usage errors, so scripts and pipes never prompt.
+  const canAsk = process.stdin.isTTY && process.stdout.isTTY;
+  if (idCmds.includes(opts.cmd) && !/^\d+$/.test(opts.id || '')) {
+    if (opts.id == null && canAsk) opts.pickTask = true;
+    else die(`usage: st-tasks ${opts.cmd} <id>${opts.cmd === 'comment' ? ' "text"' : spec?.user === 'required' ? ' <user>' : spec?.user ? ' [user]' : ''}`);
+  }
+  if (opts.cmd === 'comment' && !opts.message) {
+    if (canAsk) opts.askMessage = true;
+    else die('usage: st-tasks comment <id> "text"');
+  }
   if (spec?.user === 'required' && !opts.who) {
-    // On a terminal, ask for the name once the task has been checked; otherwise there is nobody to ask.
-    if (!process.stdin.isTTY || !process.stdout.isTTY) die(`usage: st-tasks ${opts.cmd} <id> <user>`);
+    // On a terminal, pick the person once the task has been checked; otherwise there is nobody to ask.
+    if (!canAsk) die(`usage: st-tasks ${opts.cmd} <id> <user>`);
     opts.askWho = true;
   }
   if (spec && !spec.user && opts.who) die(`unknown argument: ${opts.who[0]}`);
-  if (opts.cmd === 'log' && opts.id && !opts.duration) die('usage: st-tasks log <id> <duration> ["note"] [date]   e.g. st-tasks log 123 1h30m "fixed the bug"');
+  if (opts.cmd === 'log' && opts.id && !opts.duration) {
+    if (canAsk) opts.askLog = true;
+    else die('usage: st-tasks log <id> <duration> ["note"] [date]   e.g. st-tasks log 123 1h30m "fixed the bug"');
+  }
   return opts;
 }
 
@@ -279,9 +296,12 @@ function dueLabel(d) {
   return d;
 }
 
+// Visible text of a string: SGR colors and OSC 8 links removed (for width measuring).
+const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, '');
+
 // Bordered table. Empty columns are dropped; Subject/Comments shrink to fit the terminal.
 function table(rows, cols) {
-  const strip = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, '');
+  const strip = stripAnsi;
   cols = cols.filter((col) => col.title || rows.some((r) => strip(col.get(r))));
   // Don't truncate when piped, so other tools get full subjects.
   const width = process.stdout.columns || Number(process.env.COLUMNS) || Infinity;
@@ -307,6 +327,165 @@ function table(rows, cols) {
   for (const r of rows) console.log(row(cols.map((col) => col.get(r))));
   console.log(line('╰', '┴', '╯'));
 }
+
+// ---- Interactive widgets ----
+// `select` is split into a pure core (selectState/selectKey/selectLines: no I/O, testable by
+// slicing this section out of the file) and a thin raw-mode wrapper. `input` wraps promptLine.
+// Everything here is terminal-only; callers gate on `canAsk` (stdin and stdout TTY).
+
+// Items whose label+hint contain every word of the filter (case-insensitive), matchName-style.
+function filterItems(items, filter) {
+  const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return items;
+  return items.filter((it) => words.every((w) => (it.label + ' ' + (it.hint || '')).toLowerCase().includes(w)));
+}
+
+function selectState(items, decorate) {
+  return { items, decorate, filter: '', filtered: items, index: 0 };
+}
+
+function filterSelect(state, filter) {
+  let filtered = filterItems(state.items, filter);
+  if (state.decorate) filtered = state.decorate(filter, filtered) || filtered;
+  return { ...state, filter, filtered, index: Math.min(state.index, Math.max(filtered.length - 1, 0)) };
+}
+
+// One keypress on a select state. Returns the next state, { done: value } or { cancelled: true }.
+function selectKey(state, key) {
+  if (!key || !key.name) return state;
+  if (key.name === 'up' || (key.ctrl && key.name === 'p')) return { ...state, index: Math.max(state.index - 1, 0) };
+  if (key.name === 'down' || (key.ctrl && key.name === 'n')) return { ...state, index: Math.min(state.index + 1, Math.max(state.filtered.length - 1, 0)) };
+  if (key.name === 'return') return state.filtered.length ? { done: state.filtered[Math.min(state.index, state.filtered.length - 1)].value } : state;
+  if (key.name === 'escape' || (key.ctrl && key.name === 'c')) return { cancelled: true };
+  if (key.name === 'backspace') return filterSelect(state, state.filter.slice(0, -1));
+  if (key.ctrl && key.name === 'u') return filterSelect(state, '');
+  if (!key.ctrl && !key.meta && key.sequence && key.sequence.length === 1 && key.sequence >= ' ') return filterSelect(state, state.filter + key.sequence);
+  return state;
+}
+
+// The widget as lines of text: a header with the filter, then up to `height` windowed rows.
+function selectLines(state, { title, cols = Infinity, height = 10 } = {}) {
+  const lines = [bold(title) + (state.filter ? '  ' + cyan(state.filter) : dim('  (type to filter, ↑/↓, enter, esc)'))];
+  const list = state.filtered;
+  const start = Math.max(0, Math.min(state.index - (height >> 1), list.length - height));
+  for (let i = start; i < Math.min(start + height, list.length); i++) {
+    const it = list[i], on = i === state.index;
+    let label = it.label;
+    const hint = it.hint ? '  ' + it.hint : '';
+    const room = cols - 2 - stripAnsi(hint).length;
+    if (stripAnsi(label).length > room) label = stripAnsi(label).slice(0, Math.max(0, room - 1)) + '…';
+    lines.push((on ? cyan('❯') : ' ') + ' ' + (on ? bold(label) : label) + dim(hint));
+  }
+  if (!list.length) lines.push(dim('  no matches'));
+  return lines;
+}
+
+// Arrow-key picker on raw stdin. Returns the picked item's value, or null when cancelled.
+// `decorate(filter, filtered)` may swap in synthetic rows (e.g. "use task #123 anyway").
+function select({ title, items, decorate }) {
+  if (!process.stdin.isTTY || !items.length) return Promise.resolve(null);
+  let state = selectState(items, decorate);
+  const stdin = process.stdin, stdout = process.stdout;
+  emitKeypressEvents(stdin);
+  let drawn = 0, done = false;
+  const draw = () => {
+    const lines = selectLines(state, { title, cols: stdout.columns || 80 });
+    stdout.write((drawn ? `\x1b[${drawn}F` : '') + lines.map((l) => '\x1b[2K' + l).join('\n') + '\n\x1b[J');
+    drawn = lines.length;
+  };
+  return new Promise((resolve) => {
+    const showCursor = () => stdout.write('\x1b[?25h');
+    const finish = (value, label) => {
+      if (done) return;
+      done = true;
+      stdin.removeListener('keypress', onKey);
+      stdout.removeListener('resize', draw);
+      process.removeListener('exit', showCursor);
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdout.write(`\x1b[${drawn}F\x1b[J\x1b[?25h`); // erase the widget, keep an echo of the choice
+      if (label !== undefined) console.log(green('✔') + ' ' + title + ': ' + bold(label));
+      resolve(value);
+    };
+    const onKey = (str, key = {}) => {
+      const r = selectKey(state, key);
+      if (r.cancelled) finish(null);
+      else if (Object.hasOwn(r, 'done')) finish(r.done, state.filtered.find((it) => it.value === r.done)?.label);
+      else { state = r; draw(); }
+    };
+    stdout.write('\x1b[?25l');
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on('keypress', onKey);
+    stdout.on('resize', draw);
+    process.once('exit', showCursor);
+    draw();
+  });
+}
+
+// One line of input with an optional default and validation. Null when cancelled (Ctrl-C/Ctrl-D).
+async function input({ question, def, validate }) {
+  for (;;) {
+    const ans = await promptLine(question + (def ? dim(` [${def}]`) : '') + ' ');
+    if (ans === undefined) return null;
+    const v = ans.trim() || def || '';
+    if (!validate) return v;
+    const err = validate(v);
+    if (err === true) return v;
+    console.log(red('✗ ' + err));
+  }
+}
+
+// Pick one of my tasks. `includeClosed` for `st open`, which usually targets a closed task.
+async function taskPicker({ includeClosed = false } = {}) {
+  loader.start('Fetching your tasks…');
+  const tasks = await fetchAssigned(includeClosed);
+  loader.stop();
+  if (!tasks.length) die('No tasks to pick from.');
+  const id = await select({
+    title: 'Task',
+    items: tasks.map((t) => ({ label: `#${t.id}  ${t.subject}`, hint: `${t.project} · ${t.status}`, value: String(t.id) })),
+    // Escape hatch for a task not in the list (not assigned to me): digits that match nothing.
+    decorate: (filter, filtered) => (filtered.length || !/^\d+$/.test(filter.trim()) ? filtered : [{ label: `Use task #${filter.trim()}`, hint: 'not in this list', value: filter.trim() }]),
+  });
+  if (id === null) die('Cancelled. Nothing was changed.');
+  return id;
+}
+
+// Pick the person to assign to from the project's roster.
+async function personPicker(project, id) {
+  loader.start('Fetching people…');
+  const people = await fetchAssignees(project, id);
+  loader.stop();
+  const u = await select({ title: `Assign #${id} to`, items: people.map((p) => ({ label: cell(p.name), value: p })) });
+  if (!u) die('Cancelled. Nothing was changed.');
+  return u;
+}
+
+// `st log <id>` without a duration: ask for the time, date, note and activity instead.
+async function logWizard(opts) {
+  const duration = await input({ question: `Time on #${opts.id} (${DURATION_HELP}):`, validate: (v) => (durationOf(v) ? true : `use ${DURATION_HELP}`) });
+  if (!duration) die('Cancelled. Nothing was logged.');
+  const date = await input({ question: 'Date:', def: 'today', validate: (v) => (isDate(v) ? true : 'use today, yesterday, -N (days ago) or YYYY-MM-DD') });
+  if (date === null) die('Cancelled. Nothing was logged.');
+  const note = await input({ question: 'Note (optional):' });
+  if (note === null) die('Cancelled. Nothing was logged.');
+  loader.start('Checking your usual activity…');
+  const me = await api('/users/me');
+  const def = await defaultActivity(me.id);
+  loader.stop();
+  const activity = await select({
+    title: 'Activity',
+    items: ACTIVITIES.map(([id, name]) => ({ label: name, hint: activityHref(id) === def ? 'your latest' : '', value: name }))
+      .sort((a, b) => (a.hint ? -1 : b.hint ? 1 : 0)),
+  });
+  if (!activity) die('Cancelled. Nothing was logged.');
+  opts.duration = duration;
+  opts.date = date === 'today' ? undefined : date;
+  if (note) opts.noteWords = [note];
+  opts.as = activity; // an exact ACTIVITIES name, resolved by activityByName() in logTime()
+}
+// ---- End of interactive widgets ----
 
 async function list(opts) {
   loader.start('Fetching your tasks…');
@@ -731,6 +910,18 @@ async function promptLine(question) {
   }
 }
 
+// Everyone a task in this project can be assigned to (paged).
+async function fetchAssignees(project, id) {
+  const people = [];
+  for (let offset = 1; ; offset++) {
+    const page = await api(project.replace(/^\/api\/v3/, '') + '/available_assignees', { pageSize: '100', offset: String(offset) }, { soft: true })
+      .catch((e) => die(`Can't list the people task #${id} can be assigned to: ${e.message}`));
+    people.push(...page._embedded.elements);
+    if (people.length >= page.total || page._embedded.elements.length === 0) break;
+  }
+  return people;
+}
+
 async function changeStatus(opts) {
   const spec = STATUS_CMDS[opts.cmd], id = opts.id;
   loader.start(`Updating task #${id}…`);
@@ -743,27 +934,19 @@ async function changeStatus(opts) {
   if (spec.to && !target) die(`This OpenProject has no "${spec.to}" status.`);
 
   if (opts.askWho) {
+    // After the status guard, so a refused task never asks. The picker sets the user directly.
     loader.stop();
-    const name = (await promptLine(`Assign task #${id} to (name): `))?.trim();
-    if (name === undefined) {
-      console.log(); // the cursor is still after the prompt
-      die('Cancelled. Nothing was changed.');
-    }
-    if (!name) die('No user given. Nothing was changed.');
-    opts.who = name.split(/\s+/);
+    const project = w._links.project?.href || die(`Task #${id} has no project, so there is nobody to assign it to.`);
+    opts.whoUser = await personPicker(project, id);
     loader.start(`Updating task #${id}…`);
   }
 
   let who = null;
-  if (opts.who) {
-    const query = opts.who.join(' '), people = [], project = w._links.project?.href;
+  if (opts.whoUser) who = opts.whoUser;
+  else if (opts.who) {
+    const query = opts.who.join(' '), project = w._links.project?.href;
     if (!project) die(`Task #${id} has no project, so there is nobody to assign it to.`);
-    for (let offset = 1; ; offset++) {
-      const page = await api(project.replace(/^\/api\/v3/, '') + '/available_assignees', { pageSize: '100', offset: String(offset) }, { soft: true })
-        .catch((e) => die(`Can't list the people task #${id} can be assigned to: ${e.message}`));
-      people.push(...page._embedded.elements);
-      if (people.length >= page.total || page._embedded.elements.length === 0) break;
-    }
+    const people = await fetchAssignees(project, id);
     const hits = matchName(people, query, (u) => cell(u.name));
     if (!hits.length) die(`Nobody who can be assigned to task #${id} matches "${query}".`);
     if (hits.length > 1) die(`"${query}" matches ${hits.length} people: ${hits.slice(0, 8).map((u) => cell(u.name)).join(', ')}${hits.length > 8 ? ', …' : ''}. Be more specific.`);
@@ -803,8 +986,17 @@ process.stdout.on('error', (e) => (e.code === 'EPIPE' ? process.exit(0) : Promis
 
 const opts = parseArgs(process.argv.slice(2));
 try {
+  // Argument completion: on a terminal, pickers and prompts fill in what was left out
+  // (opts.pickTask / askLog / askMessage from parseArgs), then the handlers run unchanged.
+  if (opts.pickTask) opts.id = await taskPicker({ includeClosed: opts.cmd === 'open' });
+  if (opts.askLog) await logWizard(opts);
+  if (opts.askMessage) {
+    const message = await input({ question: `Comment on #${opts.id}:` });
+    if (!message) die('Cancelled. Nothing was changed.');
+    opts.message = message;
+  }
   if (opts.cmd === 'help') {
-    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 20).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 24).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
   } else if (opts.cmd === 'log') {
     await (opts.id ? logTime(opts) : worklog(opts));
   } else if (opts.cmd === 'comment') {
