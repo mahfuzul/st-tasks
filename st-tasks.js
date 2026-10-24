@@ -457,7 +457,7 @@ async function input({ question, def, validate }) {
 function pickTask(tasks, title) {
   return select({
     title,
-    items: tasks.map((t) => ({ label: `${t.flag ? t.flag + ' ' : ''}#${t.id}  ${t.subject}`, hint: `${t.project} · ${statusColor(t.status)(t.status)}`, value: String(t.id) })),
+    items: tasks.map((t) => ({ label: `${t.flag ? t.flag + ' ' : ''}#${t.id}  ${t.subject}`, hint: [t.project, t.priority && priorityColor(t.priority)(t.priority), statusColor(t.status)(t.status)].filter(Boolean).join(' · '), value: String(t.id) })),
     // Escape hatch for a task not in the list (not assigned to me): digits that match nothing.
     decorate: (filter, filtered) => (filtered.length || !/^\d+$/.test(filter.trim()) ? filtered : [{ label: `Use task #${filter.trim()}`, hint: 'not in this list', value: filter.trim() }]),
   });
