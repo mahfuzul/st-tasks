@@ -17,7 +17,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 | `st show <id>` | `show()` | Details, description, "Last updated", the last 5 comments |
 | `st log [date]` | `worklog()` | Time logged on a date. Date: `today`, `yesterday`, `-N`, `YYYY-MM-DD`, in any position. `--text`, `--json`, `--miss` |
 | `st log <id> <dur> ["note"] [date] [--as act]` | `logTime()` | **Writes.** Creates a time entry |
-| `st comment <id> "text"` | `comment()` | **Writes.** Prints `Comment #<activity id>` |
+| `st comment <id> "text"` | `comment()` | **Writes.** Prints `Comment #<n>`, the per-task number the web UI shows (position in the activities list) |
 | `st start <id>` / `st close <id>` | `changeStatus()` | **Writes.** No user argument. `start --force` (`takeOver`) assigns the task to me |
 | `st qa/question/at_client <id> <user>` | `changeStatus()` | **Writes.** Status + assignee; the user is required. Table in `STATUS_CMDS` |
 | `st open <id> [user]` | `changeStatus()` | **Writes.** Status to Open from any status; assigns when a user is given (`--force` without one assigns to me, like `start --force`: `takeOver`). There is no browser-opening command any more: task IDs are OSC 8 links |
@@ -69,7 +69,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 - **Time entries:** `POST /api/v3/time_entries` with `workPackage` and `activity` links, `hours` as ISO 8601 and `spentOn`. The server has no `/time_entries/form`, `/schema` or `/activities` list, so activity ids are hard-coded in `ACTIVITIES` (from the Log time form: 1 Project Management, 3 Developer, 29 Senior Developer, 19 QA, 30 Design / Wireframe, 6 Other). The default activity is the one on my latest time entry (`defaultActivity()`), else Developer (3).
 - **Time entry `comment` is a plain string** on this server, both when reading and writing. Sending `{raw: ...}` stores the literal text `{"raw"=>"..."}`. Deleting needs `Accept: application/hal+json` (a bare `DELETE` gets 406); test entries are removed through the API with the entry's `delete` link.
 - **Durations** mirror the Log time form: 0-8 h plus 0/15/30/45 min (`durationOf()`). The form's own values 25/50/75 for the minutes are hundredths of an hour, so we send real minutes.
-- **Comments:** `POST /work_packages/<id>/activities` with `{comment: {raw}}`. The printed number is the activity `id`; the link anchor uses its `version` (the per-task number the web UI shows).
+- **Comments:** `POST /work_packages/<id>/activities` with `{comment: {raw}}`. The printed number and link anchor are the comment's 1-based position in the task's `/activities` list, re-fetched after the POST (that is the #N the web UI shows; the activity `version` is a journal counter that also counts non-comment changes, so it is wrong). If the re-fetch fails it falls back to the activity `id`.
 - **Status:** `PATCH /work_packages/<id>` with `lockVersion` and `_links.status` (looked up by name in `/statuses`, not hard-coded). Assignees come from `<project>/available_assignees` (the work-package-level path 404s, paged by `fetchAssignees()`) and are matched by `matchName()`, or picked from a list when no user was typed.
 - `api()` takes `{method, body}` for writes and `{soft: true}` to throw instead of exiting (used so `st log --miss` can carry on after one failure).
 - `st log --miss` asks for a duration per task through `readline/promises` on a TTY only (`offerLogging()`).

@@ -487,7 +487,7 @@ async function personPicker(project, id) {
 async function logWizard(opts) {
   const duration = await input({ question: `Time on #${opts.id} (${DURATION_HELP}):`, validate: (v) => (durationOf(v) ? true : `use ${DURATION_HELP}`) });
   if (!duration) cancel('Cancelled. Nothing was logged.');
-  const date = await input({ question: 'Date:', def: 'today', validate: (v) => (isDate(v) ? true : 'use today, yesterday, -N (days ago) or YYYY-MM-DD') });
+  const date = await input({ question: `Date (${DATE_HELP}):`, def: 'today', validate: (v) => (isDate(v) ? true : `use ${DATE_HELP}`) });
   if (date === null) cancel('Cancelled. Nothing was logged.');
   const note = await input({ question: 'Note (optional):' });
   if (note === null) cancel('Cancelled. Nothing was logged.');
@@ -789,6 +789,7 @@ async function show(id) {
 // Time entry activities on this OpenProject (ids come from the "Log time" form).
 const ACTIVITIES = [[1, 'Project Management'], [3, 'Developer'], [29, 'Senior Developer'], [19, 'QA'], [30, 'Design / Wireframe'], [6, 'Other']];
 const activityHref = (id) => `/api/v3/time_entries/activities/${id}`;
+const DATE_HELP = 'today, yesterday, -N for N days ago, or YYYY-MM-DD, e.g. -2, 2026-10-20';
 const DURATION_HELP = 'up to 8h and minutes of 15m, 30m or 45m, e.g. 1h, 45m, 2h15m';
 
 // Items whose name matches `query`: an exact name wins, otherwise every word of the query must appear in it.
@@ -919,8 +920,11 @@ async function offerLogging(missing, date, meId, activity) {
 async function comment(id, text) {
   loader.start(`Posting comment on task #${id}…`);
   const a = await api(`/work_packages/${id}/activities`, {}, { method: 'POST', body: { comment: { raw: text } } });
+  // The number the web UI shows is the comment's position in the task's activity list, not its id or version.
+  const all = await api(`/work_packages/${id}/activities`, {}, { soft: true }).then((r) => r._embedded.elements, () => []);
+  const pos = all.findIndex((e) => e.id === a.id) + 1;
   loader.stop();
-  console.log(`${green('Comment')} ${link(`${BASE}/work_packages/${id}/activity#activity-${a.version}`, cyan('#' + a.id))} added to task ${wpLink(id)}`);
+  console.log(`${green('Comment')} ${link(`${BASE}/work_packages/${id}/activity#activity-${pos || a.version}`, cyan('#' + (pos || a.id)))} added to task ${wpLink(id)}`);
 }
 
 // Ask one question on a terminal. Resolves undefined when the prompt is cancelled (Ctrl-C, Ctrl-D).
