@@ -921,8 +921,11 @@ async function comment(id, text) {
   loader.start(`Posting comment on task #${id}…`);
   const a = await api(`/work_packages/${id}/activities`, {}, { method: 'POST', body: { comment: { raw: text } } });
   // The number the web UI shows is the comment's position in the task's activity list, not its id or version.
-  const all = await api(`/work_packages/${id}/activities`, {}, { soft: true }).then((r) => r._embedded.elements, () => []);
-  const pos = all.findIndex((e) => e.id === a.id) + 1;
+  let pos = 0;
+  try {
+    const r = await api(`/work_packages/${id}/activities`, {}, { soft: true });
+    pos = (r?._embedded?.elements ?? []).findIndex((e) => e.id === a.id) + 1;
+  } catch { /* cosmetic only: the comment is already posted */ }
   loader.stop();
   console.log(`${green('Comment')} ${link(`${BASE}/work_packages/${id}/activity#activity-${pos || a.version}`, cyan('#' + (pos || a.id)))} added to task ${wpLink(id)}`);
 }
