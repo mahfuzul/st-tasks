@@ -25,7 +25,7 @@ It is a single Node.js script with no dependencies and talks to the OpenProject 
 ## Setup
 
 ```sh
-git clone <this-repo-url> st-tasks
+git clone git@github.com:mahfuzul/st-tasks.git st-tasks
 cd st-tasks
 cp .env.example .env
 npm link   # puts `st` on your PATH (`st-tasks` and `st-task` work too)
