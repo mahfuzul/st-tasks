@@ -1003,11 +1003,11 @@ async function changeStatus(opts) {
 // the session (see `inSession`). Esc at the menu goes back to the list.
 async function interactiveTask(id, subject) {
   const actions = [
-    { label: 'Show details', value: 'show' },
-    { label: 'Log time', value: 'log' },
+    { label: 'Show Details', value: 'show' },
+    { label: 'Log Time', value: 'log' },
     { label: 'Comment', value: 'comment' },
     ...Object.entries(STATUS_CMDS).map(([cmd, spec]) => ({
-      label: cmd.replace(/_/g, ' '),
+      label: cmd === 'qa' ? 'QA' : cmd.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
       hint: spec.to ? `→ ${spec.to}` + (spec.user ? ', assign' : '') : 'assign only',
       value: cmd,
     })),
@@ -1039,7 +1039,7 @@ async function interactiveTask(id, subject) {
       // A timed-out or 5xx write may have been applied: show what is there before anyone retries.
       if (e.ambiguous && action === 'log') {
         try { await worklog({ date: o.date }); } catch (err) { console.error(yellow('warning: ') + `couldn't re-read the day's entries (${err.message})`); }
-      } else if (e.ambiguous) console.error(yellow('warning: ') + `check task #${id} (Show details) before trying again`);
+      } else if (e.ambiguous) console.error(yellow('warning: ') + `check task #${id} (Show Details) before trying again`);
     }
     console.log();
   }
