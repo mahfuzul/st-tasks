@@ -11,6 +11,9 @@
 //   st-tasks log [date]      my work log for today, yesterday or YYYY-MM-DD: time logged per task
 //   st-tasks log --miss      tasks I commented on or changed the status of with no time logged (slower); offers to log time
 //   st-tasks log --text      the same tasks as a plain "Working on:" list to paste into a status update
+//   st-tasks week [range]    time logged per project per day over a range; without one, this week
+//                            ranges: last, -2 (weeks back), a date (its week), 2026-11-02..2026-11-08
+//                            --tasks rows per task instead of per project; also --json, --text
 //   st-tasks log <id> 1h30m ["note"] [date] [--as qa]   log time (up to 8h; minutes 15m/30m/45m) on a task; default today, my usual activity
 //   st-tasks comment <id> "text"                        post a comment on a task
 //   st-tasks start <id>                                 Open -> In progress (with --force: from any status, assigned to me)
@@ -190,6 +193,7 @@ function parseArgs(argv) {
     else if (flag === '--json') opts.json = true;
     else if (flag === '--text') opts.text = true;
     else if (flag === '--miss') opts.miss = true;
+    else if (flag === '--tasks' || flag === '-t') opts.tasks = true;
     else if (flag === '--force' || flag === '-f') opts.force = true;
     else if (flag === '--as') opts.as = value(flag, argv[++i]);
     else if (flag === '-p' || flag === '--project') opts.project = value(flag, argv[++i]);
@@ -198,9 +202,9 @@ function parseArgs(argv) {
     else if (opts.cmd === 'list') {
       // Only the first word picks the command. Later words are that command's arguments and can
       // never switch to another one, so a note like "close 456" can't run `st close 456`.
-      if (!['show', 'comment', 'log'].includes(a) && !Object.hasOwn(STATUS_CMDS, a)) die(`unknown argument: ${a}`);
+      if (!['show', 'comment', 'log', 'week'].includes(a) && !Object.hasOwn(STATUS_CMDS, a)) die(`unknown argument: ${a}`);
       opts.cmd = a;
-      if (a !== 'log') opts.id = argv[++i];
+      if (a !== 'log' && a !== 'week') opts.id = argv[++i];
       if (a === 'comment') {
         // Everything after the id is the comment, so it may contain dashes and unquoted words.
         opts.message = argv.slice(i + 1).join(' ').trim();
@@ -211,6 +215,12 @@ function parseArgs(argv) {
     else if (Object.hasOwn(STATUS_CMDS, opts.cmd)) {
       if (!literal && a.startsWith('-')) die(`unknown argument: ${a}`);
       (opts.who ??= []).push(a); // the person's name, even if a word in it is also a command
+    }
+    else if (opts.cmd === 'week') {
+      // Dates only, so a leading dash followed by a digit is a date, not an option: `-2` (weeks
+      // back) and range sides like `-13..today` are arguments; `--json` and friends are handled above.
+      if (!literal && /^-(?!\d)/.test(a)) die(`unknown argument: ${a}`);
+      (opts.range ??= []).push(a);
     }
     else if (opts.cmd === 'log') {
       if (opts.noteWords) opts.noteWords.push(a); // once the note starts it runs to the end
@@ -329,13 +339,13 @@ function table(rows, cols) {
     w[i]--;
     over--;
   }
-  const fit = (s, n) => {
+  const fit = (s, n, right) => {
     const plain = strip(s);
-    if (plain.length <= n) return s + ' '.repeat(n - plain.length);
+    if (plain.length <= n) return right ? ' '.repeat(n - plain.length) + s : s + ' '.repeat(n - plain.length);
     return plain.slice(0, n - 1) + '…';
   };
   const line = (l, m, r) => dim(l + w.map((n) => '─'.repeat(n + 2)).join(m) + r);
-  const row = (cells) => dim('│') + ' ' + cells.map((cell, i) => fit(cell, w[i])).join(' ' + dim('│') + ' ') + ' ' + dim('│');
+  const row = (cells) => dim('│') + ' ' + cells.map((cell, i) => fit(cell, w[i], cols[i].align === 'right')).join(' ' + dim('│') + ' ') + ' ' + dim('│');
   console.log(line('╭', '┬', '╮'));
   console.log(row(cols.map((col) => bold(col.title))));
   console.log(line('├', '┼', '┤'));
@@ -560,11 +570,22 @@ async function list(opts) {
 }
 
 // Local date as YYYY-MM-DD, `offset` days from today.
+const fmtDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 function isoDate(offset = 0) {
   const d = new Date();
   d.setDate(d.getDate() + offset);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return fmtDate(d);
 }
+
+// Day arithmetic on YYYY-MM-DD strings, in local time. Weeks start on Monday.
+const dateOnly = (date) => new Date(date + 'T00:00:00');
+function addDays(date, n) {
+  const d = dateOnly(date);
+  d.setDate(d.getDate() + n);
+  return fmtDate(d);
+}
+const weekStart = (date) => addDays(date, -((dateOnly(date).getDay() + 6) % 7));
+const weekOf = (date) => ({ from: weekStart(date), to: addDays(weekStart(date), 6) });
 
 function parseDate(arg) {
   if (!arg || arg === 'today') return isoDate(0);
@@ -572,6 +593,25 @@ function parseDate(arg) {
   if (/^-\d+$/.test(arg)) return isoDate(Number(arg)); // e.g. -2 = two days ago
   if (/^\d{4}-\d{2}-\d{2}$/.test(arg) && !isNaN(new Date(arg))) return arg;
   die(`invalid date "${arg}" — use today, yesterday, -N (days ago) or YYYY-MM-DD`);
+}
+
+// The date range of `st week`: nothing (or `this`) is the current week, `last` the one before it,
+// `-N` the week N weeks back, a single date the week containing it, and two dates — written
+// `a b` or `a..b`, either side of `..` optional — that range. On its own `-N` counts weeks
+// because this command is about weeks; inside a range it keeps its usual "N days ago" meaning.
+function parseRange(words = []) {
+  const [first, second, ...rest] = words;
+  if (rest.length) die(`unknown argument: ${rest[0]}`);
+  const order = (a, b) => (a <= b ? { from: a, to: b } : { from: b, to: a });
+  if (second) return order(parseDate(first), parseDate(second));
+  if (first?.includes('..')) {
+    const [a, b] = first.split('..');
+    return order(a ? parseDate(a) : weekStart(isoDate(0)), b ? parseDate(b) : isoDate(0));
+  }
+  if (!first || first === 'this' || first === 'week') return weekOf(isoDate(0));
+  if (['last', 'prev', 'previous'].includes(first)) return weekOf(addDays(isoDate(0), -7));
+  if (/^-\d+$/.test(first)) return weekOf(addDays(isoDate(0), 7 * Number(first)));
+  return weekOf(parseDate(first));
 }
 
 // ISO 8601 duration ("PT1H30M", "PT0.5H", "P1DT2H") -> hours.
@@ -660,12 +700,13 @@ async function fetchTouched(date, meId, skipIds = new Set()) {
   return touched.sort((a, b) => b.id - a.id);
 }
 
-// My time entries on `date`.
-async function fetchEntries(meId, date, init) {
+// My time entries on `date`, or from `date` to `to` when a range is given.
+async function fetchEntries(meId, date, init, to) {
+  const spentOn = to && to !== date ? { operator: '<>d', values: [date, to] } : { operator: '=d', values: [date] };
   const entries = [];
   for (let offset = 1; ; offset++) {
     const page = await api('/time_entries', {
-      filters: [{ user: { operator: '=', values: [String(meId)] } }, { spent_on: { operator: '=d', values: [date] } }],
+      filters: [{ user: { operator: '=', values: [String(meId)] } }, { spent_on: spentOn }],
       pageSize: '100',
       offset: String(offset),
     }, init);
@@ -752,6 +793,103 @@ async function worklog(opts) {
     ]);
     if (process.stdin.isTTY && process.stdout.isTTY) await offerLogging(missing, date, me.id, activity);
   }
+}
+
+// `st week [range]`: a cross-tab of the time I logged over a date range — one row per project
+// (per task with --tasks), one column per day, totals down the right and along the bottom, like
+// OpenProject's weekly cost report. Days with nothing logged are left out, and a range with more
+// than 14 of them is bucketed by week instead, so a month or a quarter still fits on screen.
+async function weekReport(opts) {
+  const { from, to } = parseRange(opts.range);
+  loader.start(`Fetching time entries for ${from} → ${to}…`);
+  const me = await api('/users/me');
+  const entries = await fetchEntries(me.id, from, undefined, to);
+  loader.stop();
+
+  const days = [...new Set(entries.map((e) => e.spentOn))].sort();
+  const byWeek = days.length > 14;
+  const bucketOf = (date) => (byWeek ? weekStart(date) : date);
+  const buckets = [...new Set(days.map(bucketOf))].sort();
+  const bucketTitle = (b) =>
+    byWeek ? 'wk ' + dateOnly(b).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+           : dateOnly(b).toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit' });
+
+  // One pass fills both groupings: the table's rows (by project, or by task with --tasks) and the
+  // per-task totals the summary line and --text need.
+  const rows = new Map(), byTask = new Map(), bucketTotals = new Map();
+  for (const e of entries) {
+    const wp = e._links.workPackage;
+    const id = wp?.href ? Number(wp.href.split('/').pop()) : null;
+    const project = cell(e._links.project?.title);
+    const hours = hoursOf(e.hours), bucket = bucketOf(e.spentOn);
+    const blank = () => ({ id, project, subject: wp?.title ? cell(wp.title) : '(no task)', hours: 0, entries: 0, tasks: new Set(), byBucket: new Map() });
+    for (const [group, key] of [[rows, opts.tasks ? wp?.href ?? 'none' : project], [byTask, wp?.href ?? 'none']]) {
+      if (!group.has(key)) group.set(key, blank());
+      const t = group.get(key);
+      t.hours += hours;
+      t.entries++;
+      if (id) t.tasks.add(id);
+      t.byBucket.set(bucket, (t.byBucket.get(bucket) || 0) + hours);
+    }
+    bucketTotals.set(bucket, (bucketTotals.get(bucket) || 0) + hours);
+  }
+  const list = [...rows.values()].sort((a, b) => b.hours - a.hours);
+  const tasks = [...byTask.values()].sort((a, b) => b.hours - a.hours);
+  const total = tasks.reduce((sum, t) => sum + t.hours, 0);
+
+  // Plain list for pasting into a status update, the same shape as `st log --text`.
+  if (opts.text) {
+    if (!tasks.length) return console.log(`No time logged from ${from} to ${to}.`);
+    return console.log('Working on:\n\n' + tasks.map((t) => `- ${t.id ? `Task #${t.id}: ` : ''}${t.subject}`).join('\n'));
+  }
+
+  if (opts.json) {
+    return console.log(JSON.stringify({
+      from,
+      to,
+      totalHours: total,
+      days: days.map((d) => ({ date: d, hours: entries.filter((e) => e.spentOn === d).reduce((s, e) => s + hoursOf(e.hours), 0) })),
+      rows: list.map((r) => ({
+        ...(opts.tasks ? { id: r.id, subject: r.subject } : {}),
+        project: r.project,
+        hours: r.hours,
+        entries: r.entries,
+        tasks: [...r.tasks],
+        byDate: Object.fromEntries(r.byBucket),
+      })),
+    }, null, 2));
+  }
+
+  const span = (d) => dateOnly(d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  const is = (w) => w.from === from && w.to === to;
+  const when = is(weekOf(isoDate(0))) ? `this week ${dim(`(${span(from)} → ${span(to)})`)}`
+             : is(weekOf(addDays(isoDate(0), -7))) ? `last week ${dim(`(${span(from)} → ${span(to)})`)}`
+             : `from ${span(from)} to ${span(to)}`;
+  if (!entries.length) return console.log(`You haven't logged any time ${when}.`);
+
+  const projects = new Set(entries.map((e) => cell(e._links.project?.title))).size;
+  console.log(
+    `You logged ${bold(fmtHours(total))} ${when} across ${bold(tasks.length)} task${tasks.length === 1 ? '' : 's'} ` +
+      `in ${bold(projects)} project${projects === 1 ? '' : 's'}` +
+      dim(` (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}, ${fmtHours(total / days.length)} per day over ${days.length} day${days.length === 1 ? '' : 's'})`) + '.\n',
+  );
+
+  // The totals row rides along as a last row, bolded through `total`.
+  const totalRow = { project: 'Total', hours: total, byBucket: bucketTotals, total: true };
+  table([...list, totalRow], [
+    ...(opts.tasks ? [{ title: 'ID', get: (r) => (r.id && !r.total ? wpLink(r.id) : '') }] : []),
+    { title: 'Project', get: (r) => (r.total ? bold('Total') : r.project) },
+    ...(opts.tasks ? [{ title: 'Subject', get: (r) => (r.total ? '' : r.subject) }] : []),
+    ...buckets.map((b) => ({
+      title: bucketTitle(b),
+      align: 'right',
+      get: (r) => {
+        const h = r.byBucket.get(b);
+        return !h ? '' : r.total ? bold(fmtHours(h)) : fmtHours(h);
+      },
+    })),
+    { title: 'Total', align: 'right', get: (r) => bold(fmtHours(r.hours)) },
+  ]);
 }
 
 const decode = (s) => safe(s).replace(/&nbsp;|\u00a0/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
@@ -1103,7 +1241,9 @@ try {
     opts.message = message;
   }
   if (opts.cmd === 'help') {
-    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 25).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 28).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+  } else if (opts.cmd === 'week') {
+    await weekReport(opts);
   } else if (opts.cmd === 'log') {
     await (opts.id ? logTime(opts) : worklog(opts));
   } else if (opts.cmd === 'comment') {
