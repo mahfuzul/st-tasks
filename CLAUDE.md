@@ -16,6 +16,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 | `st` / `st-tasks` | `list()` | Open tasks assigned to me. Filters: `--all`/`-a`, `-p <project>`, `-s <status>`, `--json` |
 | `st show <id>` | `show()` | Details, description, "Last updated", the last 5 comments |
 | `st log [date]` | `worklog()` | Time logged on a date. Date: `today`, `yesterday`, `-N`, `YYYY-MM-DD`, in any position. `--text`, `--json`, `--miss` |
+| `st week [range]` | `weekReport()` | Cross-tab of my time: project (or task with `--tasks`/`-t`) × day, totals right and bottom. `--json`, `--text` |
 | `st log <id> <dur> ["note"] [date] [--as act]` | `logTime()` | **Writes.** Creates a time entry |
 | `st comment <id> "text"` | `comment()` | **Writes.** Prints `Comment #<n>`, the per-task number the web UI shows (position in the activities list) |
 | `st start <id>` / `st close <id>` | `changeStatus()` | **Writes.** No user argument. `start --force` (`takeOver`) assigns the task to me |
@@ -23,7 +24,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 | `st open <id> [user]` | `changeStatus()` | **Writes.** Status to Open from any status; assigns when a user is given (`--force` without one assigns to me, like `start --force`: `takeOver`). There is no browser-opening command any more: task IDs are OSC 8 links |
 | `st assign <id> <user>` | `changeStatus()` | **Writes.** Assignee only (`to: null` in `STATUS_CMDS`), any status, no status check |
 | `st -i` / `--interactive` | `interactive()` | Terminal only; no other command or option. Task `select()` → action menu (`interactiveTask()`) → back. Esc backs out one level, exits at the list |
-| `st --help` | inline | Prints the header comment lines of `st-tasks.js` (`.split('\n').slice(1, 25)`). **Update that slice if you add or remove usage lines.** |
+| `st --help` | inline | Prints the header comment lines of `st-tasks.js` (`.split('\n').slice(1, 28)`). **Update that slice if you add or remove usage lines.** |
 
 ## Output (requested by the user, keep as is)
 
@@ -31,6 +32,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 - **List columns:** flag (NEW/UPD), ID, Project, Subject, Status, Priority, Last updated, Log. "Last updated" is the local `YYYY-MM-DD HH:MM` plus a dim relative time. "Log" is an OSC 8 link to `${BASE}/work_packages/<id>/time_entries/new` (plain text "+ Log" when not a TTY).
 - **Log columns:** Time, ID, Project, Subject, Entries, Comments.
 - **Missing log time (`st log --miss`):** shows only a table of tasks I commented on or changed the status of that day with no time entry ("N tasks with activity but no time logged DATE:"). Columns: ID, Project, Subject, Activity (`Commented`, `Status → X`), Log (`+ Log` link). `--json` adds `missingLogTime`; `--text` ignores the flag. It's a flag because it's slow (5-15s): `fetchTouched()` lists tasks with `updatedAt` `<>d` from the start of the local day **until now** (a task I commented on may have been updated since; all projects, any assignee), drops tasks that already have time logged that day, then reads each remaining task's `/activities` (12 at a time) and keeps mine. My activities per task are cached in `.cache.json` (`{base, meId, tasks: {id: {updatedAt, seen, mine: [{at, actions}]}}}`), valid while the task's `updatedAt` is unchanged, so repeat runs and other dates need few requests; entries unseen for 60 days are pruned. A corrupt or missing cache is ignored. A cold run for -14 takes ~40s, mostly because the collection query is ~2.5s per 100 tasks and `select` doesn't shrink it. Plain `st log` stays fast (one time-entries query). On a TTY the table is followed by a prompt to log time per task (see Write commands).
+- **Week report (`st week`):** summary line ("You logged 29h 15m this week (Mon, 9 Nov 2026 → Sun, 15 Nov 2026) across N tasks in P projects (E entries, Xh per day over D days)"), then a cross-tab: rows are projects sorted by time (tasks with `--tasks`), columns are the days that have time logged, right-aligned, plus a right-hand `Total` column and a bold `Total` row. Empty cells are blank, like the web cost report. Days with nothing logged are dropped; above 14 of them the columns become weeks (`wk 02 Nov`), so a long range stays readable. The table needs ~100 columns and isn't truncated below that (only Subject/Comments shrink).
 - The **Type**, **Due** and **Activity** columns were removed on purpose from the list and log tables (Activity only exists in the missing-log-time table). `dueLabel()` is still in the file but unused.
 - **Summary line above the list:** "You have N open tasks: 7 Open, 3 In progress and 1 On hold." Statuses are sorted by count. Without `--all` it is followed by "Last checked … · N new or updated since then".
 - **Log summary:** "You logged Xh Ym today (Wed, 14 Oct 2026) across N tasks (M entries)."
@@ -51,6 +53,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
   - `strip()` removes both SGR and OSC 8 codes before measuring widths.
   - Width comes from `process.stdout.columns`, then `$COLUMNS`, then `Infinity`, so piped output is never truncated.
   - Only the Subject and Comments columns shrink (minimum 20).
+  - `align: 'right'` on a column right-pads instead (the week report's day and total columns).
   - Columns with no title and no values are dropped.
 - **`.state.json`** holds `{checkedAt, tasks: {id: updatedAt}}`. It drives the NEW/UPD flags. Only a plain, unfiltered open-task run writes it. `--all` shows no flags at all, otherwise closed tasks would all show as NEW.
 - **`rel()`** returns m/h/d, then `Nmo ago`, then `X.Yy ago`. This keeps old tasks from showing duplicate-looking dates.
@@ -79,6 +82,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
 - **Only the first word picks the command** (`parseArgs()`). Later words belong to that command and can never switch to another one: `st log 1 1h close 2` is a note, `st assign 5 John open` is a name. This matters because the commands write. To test the parser, slice `STATUS_CMDS` up to `fetchAssigned` (plus `parseDuration`) out of the file and run it with a stubbed `die`. Never test it through the CLI: a successful parse goes on to write.
 - **Missing-argument completion** (terminal only): `parseArgs()` computes `canAsk` (stdin and stdout TTY) and, instead of a usage error, sets `opts.pickTask` (missing `<id>` on id-commands — `open` also shows closed tasks), `opts.askMessage` (`comment` without text), `opts.askLog` (`log <id>` without a duration) or `opts.askWho` (see below). After parsing, the dispatch fills these in with the pickers in the "Interactive widgets" section, then the normal handlers run unchanged: task picker → id, `logWizard()` → duration/date/note/activity, one-line `input()` → comment text. Without a TTY all of these stay strict usage errors, so scripts and pipes never prompt.
 - **Missing `<user>`** (`qa`, `question`, `at_client`, `assign`; `user: 'required'` in `STATUS_CMDS`): on a TTY `parseArgs()` sets `opts.askWho` and `changeStatus()` runs `personPicker()` (arrow-key list of the project's `available_assignees` with type-to-filter) after the status guard, so a refused task never asks. The picked user goes straight into `opts.whoUser`, skipping `matchName()`. Cancelling dies without writing. Without a TTY it is the usage error.
+- **`st week`:** `parseRange()` takes the words after `week`. Bare `-N` is **weeks** back (`last`/`prev` = `-1`), a single date is the week containing it, two words or `a..b` (either side optional) is a day range parsed with `parseDate()`, where `-N` is days ago as everywhere else. Weeks start on Monday (`weekStart()`). Dashes other than `-N` are a usage error.
 - `st log <id>`: after the duration and an optional date, the first other word starts the note and **everything after it is note**, including `-1` and `today`. `--` lets a note start with a dash.
 - `api()` has a 30 s timeout. A thrown error carries `ambiguous` when a write may have been applied (timeout, dropped connection, 5xx; not refused/unresolvable). Writes add "check before trying again" to the message; `offerLogging()` re-reads the day's entries before offering a retry. Never retry a write blindly.
 - After a successful write, follow-up reads must not fail the command: `logTime()` prints a warning if the day's total can't be fetched.
@@ -94,6 +98,7 @@ Maintainer notes for working on this tool. `README.md` covers setup and usage. T
   - `filters=[{"assignee":{"operator":"=","values":["me"]}},{"status":{"operator":"o","values":[]}}]`
   - `sortBy=[["updatedAt","desc"]]`
   - pagination via `pageSize` and `offset` (1-based page number)
+- **Time entry ranges:** `spent_on` takes `<>d` with two plain `YYYY-MM-DD` values (no times), which is what `st week` uses; `fetchEntries()` takes an optional `to` and falls back to `=d` for one day. Entries carry the date in `spentOn`.
 - **Time entries:** the `user` filter **rejects `"me"`**. Fetch `/api/v3/users/me` first and use the numeric ID. Filter the date with `spent_on` and operator `=d`. `hours` is an ISO 8601 duration such as `PT1H30M` (parsed by `hoursOf()`).
 - **Activity / comment authors:** `_links.user` has no `title`, so names are looked up by href and cached (`userName()`).
 - **Comments and descriptions** contain HTML entities. Pass them through `decode()`.

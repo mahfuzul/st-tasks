@@ -11,6 +11,7 @@ It is a single Node.js script with no dependencies and talks to the OpenProject 
 - **One-click time logging:** every task has a `+ Log` link that opens its "log time" form.
 - **Task details:** description, status, and the last 5 comments from the terminal.
 - **Daily work log:** total time and tasks per day, plus a paste-ready "Working on:" list.
+- **Weekly time report:** `st week` lays out the time you logged per project per day, like OpenProject's cost report, for the current week or any date range.
 - **Missing time finder:** `st log --miss` lists tasks you commented on or moved to a new status but haven't logged time for.
 - **Write from the terminal:** `st comment`, `st log <id> 1h30m` and status shortcuts like `st start`, `st qa` and `st close`.
 - **Interactive when you want it:** leave out a task id, user, comment text or log duration and pick from arrow-key lists with type-to-filter instead of memorizing ids and names (terminal only).
@@ -50,6 +51,7 @@ If you skip `npm link`, run the script directly with `./st-tasks.js` or `node st
 | `st show <id>` | Show one task: details, description and recent comments |
 | `st log [date]` | Show the time you logged on a day |
 | `st log --miss` | Find tasks you worked on but didn't log time for |
+| `st week [range]` | Time logged per project per day over a week or any date range |
 | `st log <id> <duration> ["note"]` | Log time on a task |
 | `st comment <id> "text"` | Post a comment on a task |
 | `st start <id>` | Move a task from Open to In progress (`--force`: from any status, and assign it to you) |
@@ -145,6 +147,46 @@ Working on:
 ```
 
 If nothing was logged, it prints `No time logged on <date>.`
+
+### `st week [range]`: time per project per day
+
+A cross-tab of the time you logged: one row per project, one column per day, totals down the right and along the bottom — the same shape as OpenProject's weekly cost report. Without a range it covers the current week (Monday to Sunday).
+
+```sh
+st week                        # this week
+st week last                   # last week
+st week -2                     # two weeks back
+st week 2026-10-20             # the week containing that date
+st week 2026-11-02..2026-11-13 # any range
+st week 2026-11-02 2026-11-13  # the same, written as two words
+st week 2026-11-02..           # from that date to today
+st week --tasks                # one row per task instead of per project
+```
+
+```
+You logged 29h 15m this week (Mon, 9 Nov 2026 → Sun, 15 Nov 2026) across 14 tasks in 9 projects (19 entries, 5h 51m per day over 5 days).
+
+╭──────────────────────┬────────┬────────┬────────┬────────┬────────┬─────────╮
+│ Project              │ Mon 09 │ Tue 10 │ Wed 11 │ Thu 12 │ Fri 13 │   Total │
+├──────────────────────┼────────┼────────┼────────┼────────┼────────┼─────────┤
+│ Refinery29           │        │ 2h 30m │     4h │     3h │     6h │ 15h 30m │
+│ PubPortal            │ 2h 15m │ 3h 30m │        │        │        │  5h 45m │
+│ Site Maintenance     │    30m │        │        │    30m │        │      1h │
+│ Total                │ 5h 45m │     6h │     6h │ 5h 30m │     6h │ 29h 15m │
+╰──────────────────────┴────────┴────────┴────────┴────────┴────────┴─────────╯
+```
+
+On its own, `-N` counts **weeks** back, because this command is about weeks (`st week -2` is the week before last). Inside a range it keeps its usual "N days ago" meaning, so `st week -13..today` is the last two weeks. Dates can be `today`, `yesterday`, `-N` or `YYYY-MM-DD`, in either order.
+
+Days with nothing logged are left out, so a normal week shows five columns. A range with more than 14 of them is grouped by week instead (`wk 02 Nov`), so a month or a quarter still fits on screen. Weeks start on Monday.
+
+| Option | What it does |
+| --- | --- |
+| `--tasks`, `-t` | One row per task (ID, Project, Subject) instead of one per project |
+| `--json` | The range, the daily totals and the rows as JSON |
+| `--text` | The tasks of the range as a plain "Working on:" list |
+
+If nothing was logged, it prints `You haven't logged any time …`.
 
 ### `st log <id> <duration>`: log time on a task
 
